@@ -1,0 +1,17 @@
+# Gradle / Android Studio
+.gradle/
+build/
+/local.properties
+.idea/
+*.iml
+.kotlin/
+captures/
+.externalNativeBuild/
+.cxx/
+
+# Подписи и ключи — не в git
+*.jks
+*.keystore
+
+# Модели не хранятся в git (F003, F008)
+*.gguf

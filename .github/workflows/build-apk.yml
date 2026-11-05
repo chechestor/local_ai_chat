@@ -1,0 +1,53 @@
+name: Build APK
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: build-apk-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v6
+
+      - name: Unit tests, lint, debug APK
+        run: ./gradlew --no-daemon testDebugUnitTest lintDebug assembleDebug
+
+      - name: Short commit SHA
+        id: sha
+        run: echo "short=${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
+
+      - name: Collect artifact files
+        run: |
+          mkdir -p dist
+          cp app/build/outputs/apk/debug/app-debug.apk "dist/local-ai-chat-${{ steps.sha.outputs.short }}.apk"
+          # Скрипт установки (F002) кладётся рядом с APK, когда появится.
+          if ls ./*.ps1 >/dev/null 2>&1; then cp ./*.ps1 dist/; fi
+          ls -la dist
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: local-ai-chat-${{ steps.sha.outputs.short }}
+          path: dist/
+          retention-days: 14
+          if-no-files-found: error
