@@ -49,7 +49,10 @@ class ModelDownloadWorker(context: Context, params: WorkerParameters) : Coroutin
         val total = specs.sumOf { it.sizeBytes }
         for ((index, spec) in specs.withIndex()) {
             val existing = dir.findFile(spec.fileName)
-            if (existing != null && existing.length() == spec.sizeBytes) continue
+            if (existing != null && existing.length() == spec.sizeBytes) {
+                customOf(spec)?.let { store.addCustom(it) }
+                continue
+            }
             existing?.delete()
             if (!WifiState.isWifi(applicationContext)) return Result.retry()
             try {
@@ -120,6 +123,15 @@ class ModelDownloadWorker(context: Context, params: WorkerParameters) : Coroutin
         }
         if (!part.renameTo(spec.fileName)) throw IOException("Не удалось переименовать файл")
         dir.findFile(spec.fileName)?.let { store.markVerified(spec, it) }
+        // Модель по названию (F010 п. 8) записывается в models.json сразу: проба — на экране или при «Применить».
+        customOf(spec)?.let { store.addCustom(it) }
+    }
+
+    private fun customOf(spec: ModelSpec): LlmModel? {
+        val i = inputData.getStringArray(KEY_IDS)?.indexOf(spec.id) ?: return null
+        val repo = inputData.getStringArray(KEY_REPOS)?.getOrNull(i)?.takeIf { it.isNotEmpty() } ?: return null
+        val commit = inputData.getStringArray(KEY_COMMITS)?.getOrNull(i) ?: return null
+        return ModelStore.customModel(repo, commit, spec.url.substringAfterLast('/'), spec.sizeBytes, spec.sha256, spec.title)
     }
 
     private suspend fun report(spec: ModelSpec, index: Int, count: Int, bytes: Long, totalAll: Long, verifying: Boolean = false) {
@@ -183,6 +195,8 @@ class ModelDownloadWorker(context: Context, params: WorkerParameters) : Coroutin
         private const val KEY_URLS = "urls"
         private const val KEY_SIZES = "sizes"
         private const val KEY_SHAS = "shas"
+        private const val KEY_REPOS = "repos"
+        private const val KEY_COMMITS = "commits"
 
         /** Задачи загрузки в процессе идут по одной: одна сеть, одно уведомление. */
         private val downloadLock = Mutex()
@@ -191,8 +205,20 @@ class ModelDownloadWorker(context: Context, params: WorkerParameters) : Coroutin
          * Ставит загрузку [specs] по очереди. [workName] — уникальное имя задачи: экран установки — [WORK_NAME],
          * настройки — [workNameFor] модели (F009 п. 5).
          */
-        fun start(context: Context, specs: List<ModelSpec>, workName: String = WORK_NAME) {
+        fun start(context: Context, specs: List<ModelSpec>, workName: String = WORK_NAME) =
+            enqueue(context, specs.map { DownloadItem(it) }, workName)
+
+        /** Модель по названию (F010): после загрузки попадает в `models.json`. */
+        fun startCustom(context: Context, model: LlmModel) =
+            enqueue(context, listOf(DownloadItem(model.spec, model.repo, model.commit)), workNameFor(model.id))
+
+        class DownloadItem(val spec: ModelSpec, val repo: String = "", val commit: String = "")
+
+        private fun enqueue(context: Context, items: List<DownloadItem>, workName: String) {
+            val specs = items.map { it.spec }
             val data = Data.Builder()
+                .putStringArray(KEY_REPOS, items.map { it.repo }.toTypedArray())
+                .putStringArray(KEY_COMMITS, items.map { it.commit }.toTypedArray())
                 .putStringArray(KEY_IDS, specs.map { it.id }.toTypedArray())
                 .putStringArray(KEY_TITLES, specs.map { it.title }.toTypedArray())
                 .putStringArray(KEY_FILES, specs.map { it.fileName }.toTypedArray())

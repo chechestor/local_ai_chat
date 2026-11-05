@@ -112,9 +112,14 @@ class ModelStore(context: Context) {
     /** Активная модель в `models.json` (восстанавливается после переустановки, F009 п. 3). */
     suspend fun writeActive(id: String?) = writeModelsFile { it.copy(active = id) }
 
-    /** Добавляет модель, скачанную по названию (F010 п. 8). */
+    /** Добавляет или обновляет модель, скачанную по названию (F010 п. 8). */
     suspend fun addCustom(model: LlmModel) = writeModelsFile { f ->
         f.copy(custom = f.custom.filter { it.id != model.id } + model)
+    }
+
+    /** Итог пробной загрузки модели по названию (F010 п. 8). */
+    suspend fun markCustom(id: String, supported: Boolean) = writeModelsFile { f ->
+        f.copy(custom = f.custom.map { if (it.id == id) it.copy(checked = true, unsupported = !supported) else it })
     }
 
     /** Все языковые модели, которые знает приложение: каталог + `models.json` (F009 п. 5). */
@@ -165,7 +170,8 @@ class ModelStore(context: Context) {
             }
         }
 
-        val downloaded = statuses.filter { it.present }.mapNotNull { it.llm }
+        // Модель, которая не прошла пробную загрузку (F010), активной быть не может.
+        val downloaded = statuses.filter { it.present }.mapNotNull { it.llm }.filter { !it.unsupported }
         if (!vosk.present || downloaded.isEmpty()) return@withContext FolderCheck.Missing(statuses, vosk)
         prepareVosk(dir)
         FolderCheck.Ready(downloaded)
@@ -303,7 +309,16 @@ class ModelStore(context: Context) {
             docId.trimEnd('/').equals("primary:Download/$FOLDER_NAME", ignoreCase = true)
 
         /** Модель, добавленная по названию (F010): запись `models.json` → модель приложения. */
-        fun customModel(repo: String, commit: String, file: String, sizeBytes: Long, sha256: String, title: String): LlmModel {
+        fun customModel(
+            repo: String,
+            commit: String,
+            file: String,
+            sizeBytes: Long,
+            sha256: String,
+            title: String,
+            checked: Boolean = false,
+            unsupported: Boolean = false,
+        ): LlmModel {
             val local = customFileName(repo, file)
             return LlmModel(
                 spec = ModelSpec(
@@ -321,7 +336,15 @@ class ModelStore(context: Context) {
                 custom = true,
                 repo = repo,
                 commit = commit,
+                checked = checked,
+                unsupported = unsupported,
             )
+        }
+
+        /** Название модели по названию: имя репозитория без `-GGUF` (F010 п. 8). */
+        fun customTitle(repo: String): String {
+            val name = repo.substringAfter('/')
+            return if (name.endsWith("-GGUF", ignoreCase = true)) name.dropLast(5) else name
         }
 
         /** Имя файла в папке: `<владелец>__<файл>`, чтобы не совпасть с файлами каталога (F010 п. 7). */
@@ -340,7 +363,9 @@ class ModelStore(context: Context) {
                         .put("size", m.spec.sizeBytes)
                         .put("sha256", m.spec.sha256)
                         .put("title", m.title)
-                        .put("addedByName", true),
+                        .put("addedByName", true)
+                        .put("checked", m.checked)
+                        .put("unsupported", m.unsupported),
                 )
             }
             root.put("custom", arr)
@@ -362,7 +387,12 @@ class ModelStore(context: Context) {
                 // Только записи с репозиторием Hugging Face, коммитом и контрольной суммой.
                 if (!HfNames.isRepoId(repo) || commit.isEmpty() || file.isEmpty() || sha.length != 64 || size <= 0) continue
                 if (file.contains('/') || file.contains("..")) continue
-                custom += customModel(repo, commit, file, size, sha, o.optString("title").ifEmpty { file })
+                custom += customModel(
+                    repo, commit, file, size, sha,
+                    title = o.optString("title").ifEmpty { file },
+                    checked = o.optBoolean("checked", true),
+                    unsupported = o.optBoolean("unsupported", false),
+                )
             }
             return ModelsFile(active, custom)
         }

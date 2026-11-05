@@ -66,6 +66,8 @@ sealed interface ModelState {
     data object NotDownloaded : ModelState
     data class Downloading(val percent: Int, val verifying: Boolean) : ModelState
     data object Queued : ModelState
+    /** Модель по названию не прошла пробную загрузку (F010 п. 8). */
+    data object Unsupported : ModelState
 }
 
 data class ModelRow(val status: ModelStatus, val state: ModelState) {
@@ -140,6 +142,7 @@ class SettingsViewModel(app: Application) : AndroidViewModel(app) {
         }
         return when {
             !st.present -> ModelState.NotDownloaded
+            st.llm?.unsupported == true -> ModelState.Unsupported
             st.spec.id == active -> ModelState.Active
             else -> ModelState.Downloaded
         }
@@ -198,7 +201,12 @@ class SettingsViewModel(app: Application) : AndroidViewModel(app) {
 /** Экран «Настройки» (F007): общий на приложение. */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun SettingsScreen(onBack: () -> Unit, onDeleteModels: () -> Unit, vm: SettingsViewModel = viewModel()) {
+fun SettingsScreen(
+    onBack: () -> Unit,
+    onDeleteModels: () -> Unit,
+    onAddByName: () -> Unit,
+    vm: SettingsViewModel = viewModel(),
+) {
     val thinking by vm.thinking.collectAsStateWithLifecycle()
     val rows by vm.rows.collectAsStateWithLifecycle()
     val generating by vm.generating.collectAsStateWithLifecycle()
@@ -261,6 +269,7 @@ fun SettingsScreen(onBack: () -> Unit, onDeleteModels: () -> Unit, vm: SettingsV
                     onDelete = { confirmDeleteModel = row },
                 )
             }
+            OutlinedButton(onClick = onAddByName) { Text("Добавить модель по названию") }
             Text("Распознавание речи", style = MaterialTheme.typography.titleSmall)
             Column {
                 Text(ModelCatalog.VOSK.title, style = MaterialTheme.typography.bodyLarge)
@@ -313,6 +322,7 @@ private fun ModelRowView(
         ModelState.Downloaded -> "Скачана"
         ModelState.NotDownloaded -> "Не скачана"
         ModelState.Queued -> "В очереди"
+        ModelState.Unsupported -> "Не поддерживается"
         is ModelState.Downloading -> if (st.verifying) "Проверка…" else "Скачивается ${st.percent}%"
     }
     Column(Modifier.fillMaxWidth()) {
@@ -338,6 +348,7 @@ private fun ModelRowView(
                     if (!wifi) Text("Подключитесь к Wi-Fi", style = MaterialTheme.typography.bodySmall)
                 }
                 ModelState.Queued, is ModelState.Downloading -> TextButton(onClick = onCancel) { Text("Отменить") }
+                ModelState.Unsupported -> TextButton(onClick = onDelete) { Text("Удалить файл") }
             }
         }
     }

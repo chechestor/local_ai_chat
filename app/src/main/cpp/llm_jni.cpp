@@ -321,6 +321,56 @@ Java_com_chechestor_localaichat_llm_LlamaNative_generate(JNIEnv *env, jobject, j
     return result;
 }
 
+// Промпт по шаблону чата, встроенному в GGUF (модели, добавленные по названию, F010 п. 9).
+// llama_chat_apply_template знает распространённые шаблоны (ChatML, Gemma, Llama 3, Phi…).
+// null — в модели нет шаблона или он не распознан. Токен BOS дописывается текстом,
+// если словарь его требует: шаблон его не добавляет, а промпт токенизируется без add_special.
+JNIEXPORT jbyteArray JNICALL
+Java_com_chechestor_localaichat_llm_LlamaNative_applyTemplate(JNIEnv *env, jobject, jlong handle,
+                                                              jobjectArray roles,
+                                                              jobjectArray contents) {
+    Engine *e = from_handle(handle);
+    if (!e) return nullptr;
+    const char *tmpl = llama_model_chat_template(e->model, nullptr);
+    if (!tmpl) return nullptr;
+
+    const jsize n = env->GetArrayLength(roles);
+    std::vector<std::string> roleStr((size_t) n), contentStr((size_t) n);
+    std::vector<llama_chat_message> chat((size_t) n);
+    size_t total = 0;
+    for (jsize i = 0; i < n; ++i) {
+        auto r = (jstring) env->GetObjectArrayElement(roles, i);
+        const char *rc = env->GetStringUTFChars(r, nullptr);
+        roleStr[(size_t) i] = rc;
+        env->ReleaseStringUTFChars(r, rc);
+        env->DeleteLocalRef(r);
+        auto c = (jbyteArray) env->GetObjectArrayElement(contents, i);
+        contentStr[(size_t) i] = bytes_to_string(env, c);
+        env->DeleteLocalRef(c);
+        total += contentStr[(size_t) i].size();
+    }
+    for (size_t i = 0; i < (size_t) n; ++i) chat[i] = {roleStr[i].c_str(), contentStr[i].c_str()};
+
+    std::vector<char> buf(total * 2 + 1024);
+    int32_t len = llama_chat_apply_template(tmpl, chat.data(), chat.size(), true, buf.data(), (int32_t) buf.size());
+    if (len < 0) {
+        LOGW("chat template not supported");
+        return nullptr;
+    }
+    if ((size_t) len > buf.size()) {
+        buf.resize((size_t) len);
+        len = llama_chat_apply_template(tmpl, chat.data(), chat.size(), true, buf.data(), (int32_t) buf.size());
+        if (len < 0) return nullptr;
+    }
+    std::string out(buf.data(), (size_t) len);
+    if (llama_vocab_get_add_bos(e->vocab)) {
+        const llama_token bos = llama_vocab_bos(e->vocab);
+        const char *bosText = bos == LLAMA_TOKEN_NULL ? nullptr : llama_vocab_get_text(e->vocab, bos);
+        if (bosText && out.rfind(bosText, 0) != 0) out.insert(0, bosText);
+    }
+    return to_jbytes(env, out.data(), out.size());
+}
+
 JNIEXPORT void JNICALL
 Java_com_chechestor_localaichat_llm_LlamaNative_free(JNIEnv *, jobject, jlong handle) {
     Engine *e = from_handle(handle);

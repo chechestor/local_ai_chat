@@ -13,6 +13,7 @@ import com.chechestor.localaichat.llm.GenerationEvent
 import com.chechestor.localaichat.llm.GenerationParams
 import com.chechestor.localaichat.llm.LlmEngine
 import com.chechestor.localaichat.llm.ProcessMemory
+import com.chechestor.localaichat.models.ChatFormat
 import com.chechestor.localaichat.models.LlmModel
 import com.chechestor.localaichat.models.ModelCatalog
 import com.chechestor.localaichat.llm.ThinkingParser
@@ -48,6 +49,15 @@ sealed interface ApplyResult {
     /** Идёт ответ или сжатие — смена модели недоступна. */
     data object Busy : ApplyResult
     data class Failed(val message: String) : ApplyResult
+}
+
+/** Итог пробной загрузки модели, скачанной по названию (F010 п. 8). */
+sealed interface ProbeResult {
+    data object Supported : ProbeResult
+    data class Unsupported(val reason: String) : ProbeResult
+    /** Идёт ответ: проба откладывается до первого «Применить». */
+    data object Deferred : ProbeResult
+    data class Failed(val message: String) : ProbeResult
 }
 
 /** Результат отправки сообщения. */
@@ -117,8 +127,13 @@ class ChatController(
         val pfd = withContext(Dispatchers.IO) { runCatching { models.openModel(model) }.getOrNull() }
             ?: return fail("Не удалось загрузить ${model.title}: нет доступа к файлу модели")
         settings.setBusyModelId(model.id)
-        val result = pfd.use { engine.load(it, model) }
+        var result = pfd.use { engine.load(it, model) }
         settings.setBusyModelId(null)
+        // Модель по названию без распознанного шаблона чата работать не сможет (F010 п. 9).
+        if (result is EngineState.Ready && model.format == ChatFormat.EMBEDDED && !engine.hasChatTemplate()) {
+            engine.unload()
+            result = fail("Не удалось загрузить ${model.title}: $NO_TEMPLATE")
+        }
         if (result is EngineState.Ready) {
             val mem = ProcessMemory.read()
             Log.i(LOG_TAG, "load model=${model.id} ms=${result.loadMillis} rssMb=${mem.rssMb} peakMb=${mem.peakRssMb}")
@@ -139,6 +154,7 @@ class ChatController(
     suspend fun apply(id: String): ApplyResult = sendMutex.withLock {
         if (_active.value != null || job?.isActive == true) return@withLock ApplyResult.Busy
         val model = models.findModel(id) ?: return@withLock ApplyResult.Failed("Модель не найдена")
+        if (model.unsupported) return@withLock ApplyResult.Failed("Модель ${model.repo} не поддерживается приложением")
         loadMutex.withLock {
             val previous = engine.model
             if (previous?.id == id && engine.state.value is EngineState.Ready) {
@@ -150,13 +166,45 @@ class ChatController(
             engine.unload()
             val result = loadInto(model)
             if (result is EngineState.Ready) {
+                if (model.custom && !model.checked) models.markCustom(model.id, supported = true)
                 saveActive(id)
                 ApplyResult.Ok
             } else {
                 val message = (result as? EngineState.Failed)?.message ?: "Не удалось загрузить ${model.title}"
+                // Отложенная проба модели по названию не прошла — «Не поддерживается» (F010 п. 8).
+                if (model.custom && !model.checked) models.markCustom(model.id, supported = false)
                 if (previous != null) loadInto(previous)
                 ApplyResult.Failed(message)
             }
+        }
+    }
+
+    /**
+     * Пробная загрузка модели, скачанной по названию (F010 п. 8): грузится вместо текущей, затем текущая
+     * возвращается. Во время ответа проба откладывается до первого «Применить».
+     */
+    suspend fun probe(model: LlmModel): ProbeResult = sendMutex.withLock {
+        if (_active.value != null || job?.isActive == true) return@withLock ProbeResult.Deferred
+        if (!ModelCatalog.fitsMemory(model.spec.sizeBytes, totalMemBytes())) return@withLock ProbeResult.Failed(NO_MEMORY)
+        loadMutex.withLock {
+            val previous = engine.model
+            engine.unload()
+            settings.setBusyModelId(model.id)
+            val pfd = withContext(Dispatchers.IO) { runCatching { models.openModel(model) }.getOrNull() }
+            val result = if (pfd == null) {
+                ProbeResult.Failed("Нет доступа к файлу модели")
+            } else {
+                when (val st = pfd.use { engine.load(it, model) }) {
+                    is EngineState.Ready ->
+                        if (engine.hasChatTemplate()) ProbeResult.Supported else ProbeResult.Unsupported(NO_TEMPLATE)
+                    is EngineState.Failed -> ProbeResult.Unsupported("неизвестная архитектура или повреждённый файл")
+                    else -> ProbeResult.Unsupported("модель не загрузилась")
+                }
+            }
+            settings.setBusyModelId(null)
+            engine.unload()
+            if (previous != null) loadInto(previous)
+            result
         }
     }
 
@@ -321,6 +369,7 @@ class ChatController(
     companion object {
         private const val LOG_TAG = "LocalAIChat"
         const val NO_MEMORY = "Модели не хватит памяти этого телефона"
+        const val NO_TEMPLATE = "шаблон чата модели не распознан"
         private const val SAVE_INTERVAL_MS = 2_000L
         private const val MAX_COMPRESS_ROUNDS = 3
         /** Лимит ответа без размышлений = запас под ответ в бюджете контекста (F006). */

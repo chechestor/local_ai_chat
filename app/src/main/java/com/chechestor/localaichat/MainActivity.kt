@@ -14,6 +14,7 @@ import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
 import com.chechestor.localaichat.chat.ChatScreen
+import com.chechestor.localaichat.models.AddModelScreen
 import com.chechestor.localaichat.settings.SettingsScreen
 import com.chechestor.localaichat.setup.SetupGate
 import com.chechestor.localaichat.setup.SetupViewModel
@@ -23,6 +24,7 @@ const val APP_TITLE = "Local AI Chat"
 
 private const val ROUTE_CHAT = "chat"
 private const val ROUTE_SETTINGS = "settings"
+private const val ROUTE_ADD_MODEL = "add-model"
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -40,8 +42,10 @@ class MainActivity : ComponentActivity() {
                             SettingsScreen(
                                 onBack = { nav.popBackStack() },
                                 onDeleteModels = { nav.popBackStack(); setup.deleteAndReinstall() },
+                                onAddByName = { nav.navigate(ROUTE_ADD_MODEL) },
                             )
                         }
+                        composable(ROUTE_ADD_MODEL) { AddModelScreen(onBack = { nav.popBackStack() }) }
                     }
                 }
             }

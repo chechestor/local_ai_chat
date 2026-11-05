@@ -36,5 +36,7 @@ internal object LlamaNative {
         seed: Int,
         callback: BytesCallback,
     ): Int
+    /** Промпт по встроенному шаблону GGUF (UTF-8); null — шаблона нет или он не распознан (F010). */
+    external fun applyTemplate(handle: Long, roles: Array<String>, contents: Array<ByteArray>): ByteArray?
     external fun free(handle: Long)
 }

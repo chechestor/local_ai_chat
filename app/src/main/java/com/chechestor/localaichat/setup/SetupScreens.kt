@@ -26,7 +26,12 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.activity.compose.BackHandler
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.setValue
+import com.chechestor.localaichat.models.AddModelScreen
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
@@ -37,17 +42,18 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 import com.chechestor.localaichat.models.LlmModel
 import com.chechestor.localaichat.models.ModelStatus
 
-/**
- * Корень приложения: пока модели не готовы, доступны только экраны установки (F008, F009).
- * [onOtherModel] — «Другая модель…» на экране установки (F010); null — ссылки нет.
- */
+/** Корень приложения: пока модели не готовы, доступны только экраны установки (F008, F009, F010). */
 @Composable
-fun SetupGate(
-    vm: SetupViewModel = viewModel(),
-    onOtherModel: (() -> Unit)? = null,
-    content: @Composable () -> Unit,
-) {
+fun SetupGate(vm: SetupViewModel = viewModel(), content: @Composable () -> Unit) {
     val ui by vm.ui.collectAsStateWithLifecycle()
+    // «Другая модель…» на экране установки ведёт на экран «Модель с Hugging Face» (F010 п. 1).
+    var adding by rememberSaveable { mutableStateOf(false) }
+    if (adding && ui is SetupUi.Install) {
+        BackHandler { adding = false; vm.check() }
+        AddModelScreen(onBack = { adding = false; vm.check() })
+        return
+    }
+    val onOtherModel = { adding = true }
     when (val s = ui) {
         SetupUi.Starting -> Centered { CircularProgressIndicator() }
         is SetupUi.NeedFolder -> FolderScreen(s.wrongFolder, vm)
@@ -92,7 +98,7 @@ private fun FolderScreen(wrongFolder: Boolean, vm: SetupViewModel) {
 }
 
 @Composable
-private fun InstallScreen(s: SetupUi.Install, vm: SetupViewModel, onOtherModel: (() -> Unit)?) {
+private fun InstallScreen(s: SetupUi.Install, vm: SetupViewModel, onOtherModel: () -> Unit) {
     val context = LocalContext.current
     val notifPermission = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) {
         // При отказе загрузка всё равно идёт, просто без видимого уведомления.
@@ -143,7 +149,7 @@ private fun InstallScreen(s: SetupUi.Install, vm: SetupViewModel, onOtherModel: 
                     DownloadLine(s.vosk, d)
                 }
             }
-            if (onOtherModel != null && !d.active) {
+            if (!d.active) {
                 TextButton(onClick = onOtherModel) { Text("Другая модель…") }
             }
             Text("Всего: ${mb(total)} МБ. Папка: ${vm.store.folderDisplayPath()}", style = MaterialTheme.typography.bodySmall)

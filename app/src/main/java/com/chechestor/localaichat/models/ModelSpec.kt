@@ -44,6 +44,10 @@ data class LlmModel(
     /** Репозиторий Hugging Face и коммит (для `models.json`). */
     val repo: String = "",
     val commit: String = "",
+    /** Пробная загрузка прошла (F010 п. 8). false — ещё не проверена (откладывается, если шёл ответ). */
+    val checked: Boolean = true,
+    /** Пробная загрузка не удалась: «Не поддерживается», «Применить» недоступна. */
+    val unsupported: Boolean = false,
 ) {
     val id: String get() = spec.id
     val title: String get() = spec.title

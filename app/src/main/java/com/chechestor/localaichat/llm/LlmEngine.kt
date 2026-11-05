@@ -139,7 +139,27 @@ class LlmEngine(
     fun buildPrompt(messages: List<ChatMessage>, thinking: Boolean): String {
         val m = model ?: error("Модель не загружена")
         return ChatTemplates.build(m.format, messages, thinking && m.supportsThinking)
+            ?: embeddedPrompt(messages)
             ?: error("Шаблон чата модели не поддерживается")
+    }
+
+    /** Промпт по шаблону, встроенному в GGUF (F010 п. 9); null — шаблон не распознан. */
+    private fun embeddedPrompt(messages: List<ChatMessage>): String? {
+        val h = handle
+        if (h == 0L) return null
+        val bytes = LlamaNative.applyTemplate(
+            h,
+            messages.map { it.role.tag }.toTypedArray(),
+            messages.map { it.text.toByteArray(Charsets.UTF_8) }.toTypedArray(),
+        ) ?: return null
+        return String(bytes, Charsets.UTF_8)
+    }
+
+    /** Есть ли у загруженной модели рабочий шаблон чата (проба модели по названию, F010 п. 8). */
+    suspend fun hasChatTemplate(): Boolean = withContext(dispatcher) {
+        runCatching {
+            buildPrompt(listOf(ChatMessage(ChatRole.SYSTEM, "s"), ChatMessage(ChatRole.USER, "u")), false).isNotEmpty()
+        }.getOrDefault(false)
     }
 
     /**
