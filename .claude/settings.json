@@ -1,0 +1,14 @@
+{
+  "permissions": {
+    "allow": [
+      "Edit(/.claude/board/**)",
+      "Write(/.claude/board/**)",
+      "Edit(/.claude/team/analyst/**)",
+      "Write(/.claude/team/analyst/**)",
+      "Edit(./.claude/board/**)",
+      "Write(./.claude/board/**)",
+      "Edit(./.claude/team/analyst/**)",
+      "Write(./.claude/team/analyst/**)"
+    ]
+  }
+}
