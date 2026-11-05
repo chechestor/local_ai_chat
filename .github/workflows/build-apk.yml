@@ -15,10 +15,12 @@ concurrency:
 jobs:
   build:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 60
     steps:
       - name: Checkout
         uses: actions/checkout@v7
+        with:
+          submodules: recursive  # third_party/llama.cpp (F003)
 
       - name: Set up JDK 17
         uses: actions/setup-java@v6

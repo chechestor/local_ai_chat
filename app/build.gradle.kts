@@ -4,9 +4,15 @@ plugins {
     alias(libs.plugins.kotlin.compose)
 }
 
+// -Plocalaichat.skipNative=true — сборка без llama.cpp (на ПК без NDK: проверка Kotlin, тесты, lint).
+// APK без нативной части модель не загрузит; в CI флаг не используется.
+val skipNative = providers.gradleProperty("localaichat.skipNative").map { it.toBoolean() }.getOrElse(false)
+
 android {
     namespace = "com.chechestor.localaichat"
     compileSdk = 35
+    // NDK и CMake зафиксированы; AGP скачивает их сам, если их нет в SDK (локально и в CI).
+    if (!skipNative) ndkVersion = "29.0.13113456"
 
     defaultConfig {
         applicationId = "com.chechestor.localaichat"
@@ -15,9 +21,14 @@ android {
         versionCode = 1
         versionName = "0.1.0"
 
-        // Целевое устройство — ARM64. x86_64 — для эмулятора на ПК разработчика.
+        // Целевое устройство — ARM64. x86_64 не собираем: удвоило бы время сборки llama.cpp в CI.
         ndk {
-            abiFilters += listOf("arm64-v8a", "x86_64")
+            abiFilters += listOf("arm64-v8a")
+        }
+        if (!skipNative) externalNativeBuild {
+            cmake {
+                arguments += listOf("-DCMAKE_BUILD_TYPE=Release", "-DANDROID_STL=c++_shared")
+            }
         }
     }
 
@@ -33,6 +44,18 @@ android {
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
+    }
+
+    if (!skipNative) externalNativeBuild {
+        cmake {
+            path = file("src/main/cpp/CMakeLists.txt")
+            version = "3.31.6"
+        }
+    }
+
+    packaging {
+        // Библиотеки распаковываются на диск: ggml ищет варианты CPU-бэкенда (libggml-cpu-*.so) в nativeLibraryDir.
+        jniLibs.useLegacyPackaging = true
     }
 
     buildFeatures {

@@ -17,6 +17,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.tooling.preview.Preview
+import com.chechestor.localaichat.modeltest.ModelTestScreen
 
 /** Заголовок главного экрана (F001). */
 const val APP_TITLE = "Local AI Chat"
@@ -27,7 +28,8 @@ class MainActivity : ComponentActivity() {
         enableEdgeToEdge()
         setContent {
             LocalAiChatTheme {
-                MainScreen()
+                // F003: временный экран проверки модели; диалоги — F004.
+                ModelTestScreen()
             }
         }
     }
