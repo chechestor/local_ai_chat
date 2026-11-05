@@ -11,8 +11,8 @@ val skipNative = providers.gradleProperty("localaichat.skipNative").map { it.toB
 android {
     namespace = "com.chechestor.localaichat"
     compileSdk = 35
-    // NDK и CMake зафиксированы; AGP скачивает их сам, если их нет в SDK (локально и в CI).
-    if (!skipNative) ndkVersion = "29.0.13113456"
+    // NDK и CMake зафиксированы под предустановленные на раннере ubuntu-latest (лицензии там приняты), см. decisions.md.
+    if (!skipNative) ndkVersion = "29.0.14206865"
 
     defaultConfig {
         applicationId = "com.chechestor.localaichat"
@@ -49,7 +49,7 @@ android {
     if (!skipNative) externalNativeBuild {
         cmake {
             path = file("src/main/cpp/CMakeLists.txt")
-            version = "3.31.6"
+            version = "3.31.5"
         }
     }
 

@@ -45,6 +45,9 @@ jobs:
           }
           Write-Host 'install.ps1 OK'
 
+      - name: Installed NDK and CMake (diagnostics)
+        run: ls "$ANDROID_SDK_ROOT/ndk" "$ANDROID_SDK_ROOT/cmake" || true
+
       - name: Unit tests, lint, debug APK
         run: ./gradlew --no-daemon testDebugUnitTest lintDebug assembleDebug
 
