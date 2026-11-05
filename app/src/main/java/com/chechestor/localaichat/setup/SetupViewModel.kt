@@ -115,6 +115,7 @@ class SetupViewModel(app: Application) : AndroidViewModel(app) {
     fun deleteAndReinstall() {
         viewModelScope.launch {
             ModelDownloadWorker.cancel(getApplication())
+            getApplication<LocalAiChatApp>().chat.stop()
             getApplication<LocalAiChatApp>().llm.unload()
             store.deleteModels()
             check()

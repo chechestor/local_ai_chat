@@ -1,0 +1,363 @@
+package com.chechestor.localaichat.chat
+
+import android.content.ClipData
+import android.content.ClipboardManager
+import android.content.Context
+import androidx.compose.foundation.ExperimentalFoundationApi
+import androidx.compose.foundation.background
+import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.imePadding
+import androidx.compose.foundation.layout.navigationBarsPadding
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.statusBarsPadding
+import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Button
+import androidx.compose.material3.DrawerValue
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
+import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.HorizontalDivider
+import androidx.compose.material3.IconButton
+import androidx.compose.material3.LinearProgressIndicator
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.ModalDrawerSheet
+import androidx.compose.material3.ModalNavigationDrawer
+import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.Scaffold
+import androidx.compose.material3.SnackbarHost
+import androidx.compose.material3.SnackbarHostState
+import androidx.compose.material3.Surface
+import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
+import androidx.compose.material3.TopAppBar
+import androidx.compose.material3.rememberDrawerState
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.text.font.FontStyle
+import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import androidx.lifecycle.viewmodel.compose.viewModel
+import com.chechestor.localaichat.data.MessageEntity
+import com.chechestor.localaichat.data.SessionEntity
+import com.chechestor.localaichat.llm.EngineState
+import com.mikepenz.markdown.m3.Markdown
+import kotlinx.coroutines.launch
+
+/** Главный экран: диалог и боковая панель со списком диалогов (F004). */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun ChatScreen(onOpenSettings: () -> Unit, vm: ChatViewModel = viewModel()) {
+    // При старте приложения панель со списком диалогов открыта (F004 п. 4).
+    val drawerState = rememberDrawerState(DrawerValue.Open)
+    val scope = rememberCoroutineScope()
+    val snackbar = remember { SnackbarHostState() }
+
+    val sessions by vm.sessions.collectAsStateWithLifecycle()
+    val currentId by vm.currentId.collectAsStateWithLifecycle()
+    val title by vm.title.collectAsStateWithLifecycle()
+    val messages by vm.messages.collectAsStateWithLifecycle()
+    val active by vm.active.collectAsStateWithLifecycle()
+    val engine by vm.engineState.collectAsStateWithLifecycle()
+    val input by vm.input.collectAsStateWithLifecycle()
+
+    ModalNavigationDrawer(
+        drawerState = drawerState,
+        drawerContent = {
+            SessionsDrawer(
+                sessions = sessions,
+                currentId = currentId,
+                onNew = { vm.newDialog(); scope.launch { drawerState.close() } },
+                onOpen = { vm.open(it); scope.launch { drawerState.close() } },
+                onRename = vm::rename,
+                onDelete = vm::delete,
+                onSettings = { scope.launch { drawerState.close() }; onOpenSettings() },
+            )
+        },
+    ) {
+        Scaffold(
+            topBar = {
+                TopAppBar(
+                    title = { Text(title, maxLines = 1, overflow = TextOverflow.Ellipsis) },
+                    navigationIcon = {
+                        IconButton(
+                            onClick = { scope.launch { drawerState.open() } },
+                            modifier = Modifier.semantics { contentDescription = "Список диалогов" },
+                        ) { Text("☰", fontSize = 22.sp) }
+                    },
+                )
+            },
+            snackbarHost = { SnackbarHost(snackbar) },
+        ) { padding ->
+            Column(
+                Modifier
+                    .fillMaxSize()
+                    .padding(padding)
+                    .imePadding(),
+            ) {
+                EngineBanner(engine)
+                val generatingHere = active != null && active?.sessionId == currentId
+                MessageList(
+                    messages = messages,
+                    active = active?.takeIf { it.sessionId == currentId },
+                    modifier = Modifier.weight(1f),
+                    onCopy = { text ->
+                        copyToClipboard(vm.getApplication(), text)
+                        scope.launch { snackbar.showSnackbar("Скопировано") }
+                    },
+                )
+                InputBar(
+                    text = input,
+                    onText = vm::onInput,
+                    onClear = vm::clearInput,
+                    generating = generatingHere,
+                    canSend = engine !is EngineState.Failed,
+                    onSend = vm::send,
+                    onStop = vm::stop,
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun EngineBanner(engine: EngineState) {
+    when (engine) {
+        EngineState.Loading, EngineState.NotLoaded -> Column(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp)) {
+            Text("Загрузка модели…", style = MaterialTheme.typography.bodySmall)
+            LinearProgressIndicator(Modifier.fillMaxWidth())
+        }
+        is EngineState.Failed -> Text(
+            engine.message,
+            color = MaterialTheme.colorScheme.error,
+            style = MaterialTheme.typography.bodySmall,
+            modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp),
+        )
+        is EngineState.Ready -> Unit
+    }
+}
+
+@Composable
+private fun MessageList(
+    messages: List<MessageEntity>,
+    active: ActiveGeneration?,
+    modifier: Modifier,
+    onCopy: (String) -> Unit,
+) {
+    val listState = rememberLazyListState()
+    LaunchedEffect(messages.size, active?.answer?.length, active?.thinking?.length) {
+        if (messages.isNotEmpty()) listState.scrollToItem(messages.size - 1, Int.MAX_VALUE / 2)
+    }
+    if (messages.isEmpty()) {
+        Box(modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
+            Text("Чем могу помочь?", style = MaterialTheme.typography.headlineSmall)
+        }
+        return
+    }
+    LazyColumn(
+        modifier = modifier.fillMaxWidth(),
+        state = listState,
+        contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 12.dp, vertical = 8.dp),
+        verticalArrangement = Arrangement.spacedBy(12.dp),
+    ) {
+        items(messages, key = { it.id }) { m ->
+            if (m.role == MessageEntity.ROLE_USER) {
+                UserBubble(m.text)
+            } else {
+                val streaming = active?.messageId == m.id
+                AssistantMessage(
+                    text = if (streaming) active!!.answer else m.text,
+                    thinking = if (streaming) active!!.thinking else "",
+                    thinkingInProgress = streaming && active!!.thinkingInProgress,
+                    streaming = streaming,
+                    onCopy = onCopy,
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun UserBubble(text: String) {
+    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
+        Surface(
+            shape = RoundedCornerShape(16.dp),
+            color = MaterialTheme.colorScheme.secondaryContainer,
+            modifier = Modifier.widthIn(max = 320.dp),
+        ) {
+            Text(text, Modifier.padding(horizontal = 12.dp, vertical = 8.dp))
+        }
+    }
+}
+
+@Composable
+private fun AssistantMessage(
+    text: String,
+    thinking: String,
+    thinkingInProgress: Boolean,
+    streaming: Boolean,
+    onCopy: (String) -> Unit,
+) {
+    Column(Modifier.fillMaxWidth()) {
+        if (thinkingInProgress || thinking.isNotEmpty()) {
+            Text(
+                if (thinkingInProgress) "Размышляю…" else "Размышления",
+                style = MaterialTheme.typography.labelMedium,
+                fontStyle = FontStyle.Italic,
+            )
+        }
+        if (text.isEmpty() && streaming) {
+            Text("…", style = MaterialTheme.typography.bodyLarge)
+        } else {
+            Markdown(content = text)
+        }
+        if (!streaming && text.isNotEmpty()) {
+            TextButton(onClick = { onCopy(text) }) { Text("Копировать") }
+        }
+    }
+}
+
+@Composable
+private fun InputBar(
+    text: String,
+    onText: (String) -> Unit,
+    onClear: () -> Unit,
+    generating: Boolean,
+    canSend: Boolean,
+    onSend: () -> Unit,
+    onStop: () -> Unit,
+) {
+    Column(Modifier.fillMaxWidth().navigationBarsPadding().padding(8.dp)) {
+        OutlinedTextField(
+            value = text,
+            onValueChange = onText,
+            modifier = Modifier.fillMaxWidth(),
+            placeholder = { Text("Сообщение") },
+            maxLines = 6,
+            shape = RoundedCornerShape(20.dp),
+        )
+        Row(
+            Modifier.fillMaxWidth().padding(top = 4.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(4.dp),
+        ) {
+            TextButton(onClick = onClear, enabled = text.isNotEmpty()) { Text("Очистить поле") }
+            // Поведение кнопки — F005 (Vosk).
+            TextButton(onClick = {}, enabled = false) { Text("🎤 Записать голос") }
+            Spacer(Modifier.weight(1f))
+            if (generating) {
+                Button(onClick = onStop) { Text("Стоп") }
+            } else {
+                Button(onClick = onSend, enabled = text.isNotBlank() && canSend) { Text("Отправить") }
+            }
+        }
+    }
+}
+
+@OptIn(ExperimentalFoundationApi::class)
+@Composable
+private fun SessionsDrawer(
+    sessions: List<SessionEntity>,
+    currentId: Long?,
+    onNew: () -> Unit,
+    onOpen: (Long) -> Unit,
+    onRename: (Long, String) -> Unit,
+    onDelete: (Long) -> Unit,
+    onSettings: () -> Unit,
+) {
+    var menuFor by remember { mutableStateOf<SessionEntity?>(null) }
+    var renameFor by remember { mutableStateOf<SessionEntity?>(null) }
+    var deleteFor by remember { mutableStateOf<SessionEntity?>(null) }
+
+    ModalDrawerSheet {
+        Column(Modifier.fillMaxSize().statusBarsPadding().navigationBarsPadding()) {
+            OutlinedButton(onClick = onNew, modifier = Modifier.fillMaxWidth().padding(12.dp)) { Text("+ Новый диалог") }
+            HorizontalDivider()
+            if (sessions.isEmpty()) {
+                Box(Modifier.weight(1f).fillMaxWidth(), contentAlignment = Alignment.Center) {
+                    Text("Диалогов пока нет", style = MaterialTheme.typography.bodyMedium)
+                }
+            } else {
+                LazyColumn(Modifier.weight(1f)) {
+                    items(sessions, key = { it.id }) { s ->
+                        Box {
+                            Text(
+                                s.title,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .background(
+                                        if (s.id == currentId) MaterialTheme.colorScheme.secondaryContainer
+                                        else MaterialTheme.colorScheme.surfaceContainerLow,
+                                    )
+                                    .combinedClickable(onClick = { onOpen(s.id) }, onLongClick = { menuFor = s })
+                                    .padding(horizontal = 16.dp, vertical = 14.dp),
+                            )
+                            DropdownMenu(expanded = menuFor?.id == s.id, onDismissRequest = { menuFor = null }) {
+                                DropdownMenuItem(text = { Text("Переименовать") }, onClick = { renameFor = s; menuFor = null })
+                                DropdownMenuItem(text = { Text("Удалить") }, onClick = { deleteFor = s; menuFor = null })
+                            }
+                        }
+                    }
+                }
+            }
+            HorizontalDivider()
+            TextButton(onClick = onSettings, modifier = Modifier.fillMaxWidth().padding(8.dp)) { Text("⚙ Настройки") }
+            Spacer(Modifier.height(4.dp))
+        }
+    }
+
+    renameFor?.let { s ->
+        var value by rememberSaveable(s.id) { mutableStateOf(s.title) }
+        AlertDialog(
+            onDismissRequest = { renameFor = null },
+            title = { Text("Переименовать диалог") },
+            text = { OutlinedTextField(value = value, onValueChange = { value = it }, singleLine = true) },
+            confirmButton = {
+                TextButton(onClick = { onRename(s.id, value); renameFor = null }, enabled = value.isNotBlank()) { Text("Сохранить") }
+            },
+            dismissButton = { TextButton(onClick = { renameFor = null }) { Text("Отмена") } },
+        )
+    }
+    deleteFor?.let { s ->
+        AlertDialog(
+            onDismissRequest = { deleteFor = null },
+            title = { Text("Удалить диалог?") },
+            text = { Text("«${s.title}» и все его сообщения будут удалены.") },
+            confirmButton = { TextButton(onClick = { onDelete(s.id); deleteFor = null }) { Text("Удалить") } },
+            dismissButton = { TextButton(onClick = { deleteFor = null }) { Text("Отмена") } },
+        )
+    }
+}
+
+private fun copyToClipboard(context: Context, text: String) {
+    val cm = context.getSystemService(ClipboardManager::class.java) ?: return
+    cm.setPrimaryClip(ClipData.newPlainText("Ответ", text))
+}
