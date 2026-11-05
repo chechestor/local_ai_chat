@@ -8,6 +8,35 @@ import android.content.pm.PackageManager
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
+import androidx.compose.foundation.gestures.scrollBy
+import androidx.compose.foundation.interaction.DragInteraction
+import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.FilledIconButton
+import androidx.compose.material3.Icon
+import androidx.compose.material3.PlainTooltip
+import androidx.compose.material3.SmallFloatingActionButton
+import androidx.compose.material3.TooltipBox
+import androidx.compose.material3.TooltipDefaults
+import androidx.compose.material3.rememberTooltipState
+import androidx.compose.runtime.derivedStateOf
+import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableStateMapOf
+import androidx.compose.runtime.rememberUpdatedState
+import androidx.compose.runtime.snapshotFlow
+import androidx.compose.runtime.withFrameNanos
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.res.painterResource
+import com.chechestor.localaichat.R
+import com.mikepenz.markdown.model.State
+import com.mikepenz.markdown.model.rememberMarkdownState
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.isActive
+import kotlin.math.max
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -101,6 +130,9 @@ fun ChatScreen(onOpenSettings: () -> Unit, vm: ChatViewModel = viewModel()) {
     val micPermission = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
         if (granted) vm.startVoice() else vm.onMicPermissionDenied()
     }
+    // Отправка ведёт ленту в конец; «Стоп» показывает уже полученный текст сразу (F004.01).
+    var scrollSignal by remember { mutableIntStateOf(0) }
+    var snapMessageId by remember { mutableStateOf<Long?>(null) }
     val onMic = {
         if (ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED) {
             vm.startVoice()
@@ -146,8 +178,11 @@ fun ChatScreen(onOpenSettings: () -> Unit, vm: ChatViewModel = viewModel()) {
                 EngineBanner(engine)
                 val generatingHere = active != null && active?.sessionId == currentId
                 MessageList(
+                    sessionId = currentId,
                     messages = messages,
                     active = active?.takeIf { it.sessionId == currentId },
+                    scrollSignal = scrollSignal,
+                    snapMessageId = snapMessageId,
                     modifier = Modifier.weight(1f),
                     onCopy = { text ->
                         copyToClipboard(vm.getApplication(), text)
@@ -161,8 +196,8 @@ fun ChatScreen(onOpenSettings: () -> Unit, vm: ChatViewModel = viewModel()) {
                     generating = generatingHere,
                     // Пока модель грузится (в том числе после «Применить»), отправить нельзя (F009 п. 6).
                     canSend = engine !is EngineState.Failed && engine !is EngineState.Loading,
-                    onSend = vm::send,
-                    onStop = vm::stop,
+                    onSend = { scrollSignal++; vm.send() },
+                    onStop = { snapMessageId = active?.messageId; vm.stop() },
                     voice = voice,
                     // Во время ответа модели (в любом диалоге) запись недоступна (F005 п. 3).
                     micEnabled = active == null,
@@ -195,46 +230,187 @@ private fun EngineBanner(engine: EngineState) {
     }
 }
 
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun MessageList(
+    sessionId: Long?,
     messages: List<MessageEntity>,
     active: ActiveGeneration?,
+    /** Растёт при каждой отправке: лента едет в конец и следит за ним (F004.01 п. 12). */
+    scrollSignal: Int,
+    /** Ответ, остановленный «Стоп»: всё полученное показывается сразу (п. 7). */
+    snapMessageId: Long?,
     modifier: Modifier,
     onCopy: (String) -> Unit,
 ) {
     val listState = rememberLazyListState()
-    LaunchedEffect(messages.size, active?.answer?.length, active?.thinking?.length) {
-        if (messages.isNotEmpty()) listState.scrollToItem(messages.size - 1, Int.MAX_VALUE / 2)
+    val density = LocalDensity.current
+    val nearEndPx = with(density) { NEAR_END.roundToPx() }
+    val minStepPx = with(density) { 2.dp.toPx() }
+
+    // Режим «следить за концом» (п. 9) и жест пользователя.
+    var follow by remember { mutableStateOf(true) }
+    var userDragging by remember { mutableStateOf(false) }
+
+    // Сколько символов ответа уже показано — только для ответов, которые выводятся на этом экране (п. 7).
+    val reveal = remember { mutableStateMapOf<Long, Int>() }
+    val currentActive by rememberUpdatedState(active)
+    val currentMessages by rememberUpdatedState(messages)
+    val currentSnap by rememberUpdatedState(snapMessageId)
+
+    fun fullLength(id: Long): Int? =
+        currentActive?.takeIf { it.messageId == id }?.answer?.length
+            ?: currentMessages.firstOrNull { it.id == id }?.text?.length
+
+    LaunchedEffect(active?.messageId) {
+        active?.messageId?.let { if (it !in reveal) reveal[it] = 0 }
     }
+
+    // Показ ответа раз в кадр ровным темпом; без работы — ждём нового текста.
+    LaunchedEffect(Unit) {
+        val progress = HashMap<Long, Double>()
+        while (true) {
+            snapshotFlow { reveal.any { (id, n) -> n < (fullLength(id) ?: 0) } }.first { it }
+            var last = withFrameNanos { it }
+            while (true) {
+                val now = withFrameNanos { it }
+                val dt = (now - last) / 1e9
+                last = now
+                var pending = false
+                for ((id, n) in reveal.toList()) {
+                    val full = fullLength(id) ?: continue
+                    if (n >= full) continue
+                    if (currentSnap == id) {
+                        reveal[id] = full
+                        continue
+                    }
+                    val p = StreamingText.step(max(progress[id] ?: 0.0, n.toDouble()), full, dt)
+                    progress[id] = p
+                    val shown = p.toInt().coerceAtMost(full)
+                    reveal[id] = shown
+                    if (shown < full) pending = true
+                }
+                if (!pending) break
+            }
+        }
+    }
+
+    /** Насколько низ последнего сообщения ниже низа ленты, px; [FAR] — последнее сообщение не видно. */
+    fun overflow(): Int {
+        val info = listState.layoutInfo
+        val last = info.visibleItemsInfo.lastOrNull() ?: return 0
+        if (last.index < info.totalItemsCount - 1) return FAR
+        return last.offset + last.size + info.afterContentPadding - info.viewportEndOffset
+    }
+
+    fun atEnd(): Boolean {
+        if (!listState.canScrollForward) return true
+        val o = overflow()
+        return o != FAR && o <= nearEndPx
+    }
+
+    // Жест пользователя выключает слежение; когда прокрутка остановилась — включаем, если он вернулся к концу.
+    LaunchedEffect(listState) {
+        listState.interactionSource.interactions.collect { i ->
+            if (i is DragInteraction.Start) {
+                userDragging = true
+                follow = false
+            }
+        }
+    }
+    LaunchedEffect(listState) {
+        snapshotFlow { listState.isScrollInProgress }.collect { inProgress ->
+            if (!inProgress && userDragging) {
+                userDragging = false
+                follow = atEnd()
+            }
+        }
+    }
+
+    // Слежение за концом: плавно доезжаем на прирост высоты, без прыжков (п. 9).
+    LaunchedEffect(listState) {
+        while (true) {
+            snapshotFlow { follow && !userDragging && listState.canScrollForward }.first { it }
+            try {
+                val o = overflow()
+                if (o == FAR) {
+                    listState.animateScrollToItem(listState.layoutInfo.totalItemsCount - 1)
+                } else {
+                    withFrameNanos { }
+                    val step = if (o <= 0) minStepPx else max(o * 0.25f, minStepPx).coerceAtMost(o.toFloat())
+                    listState.scrollBy(step)
+                }
+            } catch (e: CancellationException) {
+                // Прокрутку перехватил жест пользователя — это не отмена эффекта.
+                if (!isActive) throw e
+            }
+        }
+    }
+
+    // Открытие диалога: сразу в конце, без анимации (п. 13).
+    val hasMessages = messages.isNotEmpty()
+    LaunchedEffect(sessionId, hasMessages) {
+        if (hasMessages) {
+            listState.scrollToItem(messages.size - 1, Int.MAX_VALUE / 2)
+            follow = true
+        }
+    }
+    LaunchedEffect(scrollSignal) {
+        if (scrollSignal > 0) follow = true
+    }
+
     if (messages.isEmpty()) {
         Box(modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
             Text("Чем могу помочь?", style = MaterialTheme.typography.headlineSmall)
         }
         return
     }
-    LazyColumn(
-        modifier = modifier.fillMaxWidth(),
-        state = listState,
-        contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 12.dp, vertical = 8.dp),
-        verticalArrangement = Arrangement.spacedBy(12.dp),
-    ) {
-        items(messages, key = { it.id }) { m ->
-            if (m.role == MessageEntity.ROLE_USER) {
-                UserBubble(m.text)
-            } else {
-                val streaming = active?.messageId == m.id
-                AssistantMessage(
-                    text = if (streaming) active!!.answer else m.text,
-                    thinking = if (streaming) active!!.thinking else m.thinking,
-                    thinkingInProgress = streaming && active!!.thinkingInProgress,
-                    compressing = streaming && active!!.compressing,
-                    streaming = streaming,
-                    onCopy = onCopy,
-                )
+    val showToEnd by remember { derivedStateOf { !follow && !atEnd() } }
+    Box(modifier.fillMaxWidth()) {
+        LazyColumn(
+            modifier = Modifier.fillMaxSize(),
+            state = listState,
+            contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp),
+        ) {
+            items(messages, key = { it.id }) { m ->
+                if (m.role == MessageEntity.ROLE_USER) {
+                    UserBubble(m.text)
+                } else {
+                    val generating = active?.messageId == m.id
+                    val full = if (generating) active!!.answer else m.text
+                    val shown = reveal[m.id]
+                    AssistantMessage(
+                        text = if (shown == null) full else StreamingText.safeTake(full, shown),
+                        thinking = if (generating) active!!.thinking else m.thinking,
+                        thinkingInProgress = generating && active!!.thinkingInProgress,
+                        compressing = generating && active!!.compressing,
+                        streaming = generating || (shown != null && shown < full.length),
+                        revealed = shown != null,
+                        fullText = full,
+                        onCopy = onCopy,
+                    )
+                }
+            }
+        }
+        if (showToEnd) {
+            WithTooltip("К концу диалога") {
+                SmallFloatingActionButton(
+                    // Плавно до конца ленту ведёт цикл слежения выше (п. 11).
+                    onClick = { follow = true },
+                    shape = CircleShape,
+                    modifier = Modifier
+                        .align(Alignment.BottomEnd)
+                        .padding(12.dp)
+                        .semantics { contentDescription = "К концу диалога" },
+                ) { Icon(painterResource(R.drawable.ic_arrow_downward), contentDescription = null) }
             }
         }
     }
 }
+
+private val NEAR_END = 48.dp
+private const val FAR = Int.MAX_VALUE
 
 @Composable
 private fun UserBubble(text: String) {
@@ -256,6 +432,9 @@ private fun AssistantMessage(
     thinkingInProgress: Boolean,
     compressing: Boolean,
     streaming: Boolean,
+    /** Ответ выводился на этом экране: Markdown только для законченных строк, без пропаданий. */
+    revealed: Boolean,
+    fullText: String,
     onCopy: (String) -> Unit,
 ) {
     Column(Modifier.fillMaxWidth()) {
@@ -268,15 +447,54 @@ private fun AssistantMessage(
         if (thinkingInProgress || thinking.isNotEmpty()) {
             ThinkingBlock(thinking, thinkingInProgress)
         }
-        if (text.isEmpty() && streaming) {
-            if (!thinkingInProgress) Text("…", style = MaterialTheme.typography.bodyLarge)
-        } else {
-            Markdown(content = text)
+        when {
+            text.isEmpty() && streaming -> if (!thinkingInProgress) Text("…", style = MaterialTheme.typography.bodyLarge)
+            revealed -> StreamingMarkdown(text, streaming)
+            else -> Markdown(content = text)
         }
-        if (!streaming && text.isNotEmpty()) {
-            TextButton(onClick = { onCopy(text) }) { Text("Копировать") }
+        if (!streaming && fullText.isNotEmpty()) {
+            WithTooltip("Копировать ответ") {
+                IconButton(onClick = { onCopy(fullText) }, modifier = Modifier.size(40.dp)) {
+                    Icon(
+                        painterResource(R.drawable.ic_content_copy),
+                        contentDescription = "Копировать ответ",
+                        modifier = Modifier.size(18.dp),
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+            }
         }
     }
+}
+
+/**
+ * Ответ, который дописывается (F004.01 п. 8): Markdown разбирается только по законченным строкам и сразу,
+ * без пустого промежутка; всё, что ещё не разобрано, — обычным текстом ниже.
+ * Так уже показанный текст не пропадает и не мигает.
+ */
+@Composable
+private fun StreamingMarkdown(text: String, streaming: Boolean) {
+    val toParse = if (streaming) StreamingText.completeLines(text) else text
+    // immediate: разбор сразу при смене текста, без пустого состояния «загрузка» (в 0.35.0 нет retainState).
+    val state = rememberMarkdownState(toParse, immediate = true)
+    val parsed by state.state.collectAsStateWithLifecycle()
+    val rendered = (parsed as? State.Success)?.content ?: ""
+    val tail = text.substring(text.commonPrefixWith(rendered).length)
+    if (rendered.isNotEmpty()) Markdown(parsed)
+    if (tail.isNotBlank()) {
+        Text(StreamingText.plainTail(tail.trimStart('\n')), style = MaterialTheme.typography.bodyLarge)
+    }
+}
+
+/** Подсказка при долгом нажатии (F004.01 п. 3). */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun WithTooltip(label: String, content: @Composable () -> Unit) {
+    TooltipBox(
+        positionProvider = TooltipDefaults.rememberPlainTooltipPositionProvider(),
+        tooltip = { PlainTooltip { Text(label) } },
+        state = rememberTooltipState(),
+    ) { content() }
 }
 
 /** Свёрнутый блок «Размышления» над ответом (F007): нажатие разворачивает и сворачивает. */
@@ -310,6 +528,7 @@ private fun ThinkingBlock(thinking: String, inProgress: Boolean) {
     }
 }
 
+/** Панель ввода (F004.01 п. 1–4): один ряд — поле, микрофон, круглая «отправить» / «Стоп». */
 @Composable
 private fun InputBar(
     text: String,
@@ -325,81 +544,118 @@ private fun InputBar(
     onVoiceCancel: () -> Unit,
     onVoiceFinish: () -> Unit,
 ) {
-    Column(Modifier.fillMaxWidth().navigationBarsPadding().padding(8.dp)) {
-        val live = when (voice) {
-            is VoiceState.Recording -> voice.text
-            is VoiceState.Finishing -> voice.text
-            else -> null
-        }
-        if (voice == VoiceState.Idle) {
-            OutlinedTextField(
-                value = text,
-                onValueChange = onText,
-                modifier = Modifier.fillMaxWidth(),
-                placeholder = { Text("Сообщение") },
-                maxLines = 6,
-                shape = RoundedCornerShape(20.dp),
-            )
-        } else {
-            // Во время записи поле не редактируется; распознанное на лету — серым после введённого текста.
-            val gray = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f)
-            Surface(
-                shape = RoundedCornerShape(20.dp),
-                color = MaterialTheme.colorScheme.surfaceContainerHigh,
-                modifier = Modifier.fillMaxWidth(),
-            ) {
-                Text(
-                    buildAnnotatedString {
-                        append(text)
-                        if (!live.isNullOrBlank()) {
-                            if (text.isNotBlank()) append(" ")
-                            withStyle(SpanStyle(color = gray)) { append(live) }
-                        }
-                        if (text.isBlank() && live.isNullOrBlank()) {
-                            withStyle(SpanStyle(color = gray)) { append("Говорите…") }
+    Row(
+        Modifier
+            .fillMaxWidth()
+            .navigationBarsPadding()
+            .padding(horizontal = 8.dp, vertical = 6.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(4.dp),
+    ) {
+        when (voice) {
+            VoiceState.Idle -> {
+                OutlinedTextField(
+                    value = text,
+                    onValueChange = onText,
+                    modifier = Modifier.weight(1f).heightIn(min = BAR_HEIGHT),
+                    placeholder = { Text("Сообщение") },
+                    maxLines = 6,
+                    shape = RoundedCornerShape(24.dp),
+                    trailingIcon = if (text.isEmpty()) null else {
+                        {
+                            WithTooltip("Очистить поле") {
+                                IconButton(onClick = onClear) {
+                                    Icon(painterResource(R.drawable.ic_close), contentDescription = "Очистить поле")
+                                }
+                            }
                         }
                     },
-                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 14.dp),
-                    maxLines = 6,
                 )
-            }
-        }
-        Row(
-            Modifier.fillMaxWidth().padding(top = 4.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(4.dp),
-        ) {
-            when (voice) {
-                VoiceState.Idle -> {
-                    TextButton(onClick = onClear, enabled = text.isNotEmpty()) { Text("Очистить поле") }
-                    TextButton(onClick = onMic, enabled = micEnabled) { Text("🎤 Записать голос") }
-                    Spacer(Modifier.weight(1f))
-                    if (generating) {
-                        Button(onClick = onStop) { Text("Стоп") }
-                    } else {
-                        Button(onClick = onSend, enabled = text.isNotBlank() && canSend) { Text("Отправить") }
+                WithTooltip("Записать голос") {
+                    IconButton(onClick = onMic, enabled = micEnabled, modifier = Modifier.size(48.dp)) {
+                        Icon(painterResource(R.drawable.ic_mic), contentDescription = "Записать голос")
                     }
                 }
-                VoiceState.Preparing -> {
-                    Text("Подготовка…", Modifier.weight(1f).padding(start = 8.dp))
-                    OutlinedButton(onClick = onVoiceCancel) { Text("Отменить") }
+                if (generating) {
+                    WithTooltip("Остановить ответ") {
+                        FilledIconButton(onClick = onStop, modifier = Modifier.size(48.dp)) {
+                            Icon(painterResource(R.drawable.ic_stop), contentDescription = "Остановить ответ")
+                        }
+                    }
+                } else {
+                    WithTooltip("Отправить") {
+                        FilledIconButton(
+                            onClick = onSend,
+                            enabled = text.isNotBlank() && canSend,
+                            modifier = Modifier.size(48.dp),
+                        ) {
+                            Icon(painterResource(R.drawable.ic_arrow_upward), contentDescription = "Отправить")
+                        }
+                    }
                 }
-                is VoiceState.Recording -> {
-                    Text(
-                        "● ${formatSec(voice.elapsedSec)} / ${formatSec(VoiceInput.LIMIT_SEC)}",
-                        color = MaterialTheme.colorScheme.error,
-                        modifier = Modifier.weight(1f).padding(start = 8.dp),
-                    )
-                    OutlinedButton(onClick = onVoiceCancel) { Text("Отменить") }
-                    Button(onClick = onVoiceFinish) { Text("Завершить") }
-                }
-                is VoiceState.Finishing -> {
-                    Text("Распознаю…", Modifier.weight(1f).padding(start = 8.dp))
-                }
+            }
+            VoiceState.Preparing -> {
+                VoiceStatus(Modifier.weight(1f), status = { Text("Подготовка…") }, typed = text, live = null)
+                OutlinedButton(onClick = onVoiceCancel, contentPadding = COMPACT) { Text("Отменить", maxLines = 1, softWrap = false) }
+            }
+            is VoiceState.Recording -> {
+                VoiceStatus(
+                    Modifier.weight(1f),
+                    status = {
+                        Text(
+                            "● ${formatSec(voice.elapsedSec)} / ${formatSec(VoiceInput.LIMIT_SEC)}",
+                            color = MaterialTheme.colorScheme.error,
+                            maxLines = 1,
+                        )
+                    },
+                    typed = text,
+                    live = voice.text,
+                )
+                OutlinedButton(onClick = onVoiceCancel, contentPadding = COMPACT) { Text("Отменить", maxLines = 1, softWrap = false) }
+                Button(onClick = onVoiceFinish, contentPadding = COMPACT) { Text("Завершить", maxLines = 1, softWrap = false) }
+            }
+            is VoiceState.Finishing -> {
+                VoiceStatus(
+                    Modifier.weight(1f),
+                    status = {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            CircularProgressIndicator(Modifier.size(14.dp), strokeWidth = 2.dp)
+                            Text("Распознаю…", Modifier.padding(start = 8.dp), maxLines = 1)
+                        }
+                    },
+                    typed = text,
+                    live = voice.text,
+                )
             }
         }
     }
 }
+
+/** Голосовой ввод в том же ряду и той же высоты (F004.01 п. 4); распознанное на лету — серым. */
+@Composable
+private fun VoiceStatus(modifier: Modifier, status: @Composable () -> Unit, typed: String, live: String?) {
+    val gray = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f)
+    Surface(
+        shape = RoundedCornerShape(24.dp),
+        color = MaterialTheme.colorScheme.surfaceContainerHigh,
+        modifier = modifier.heightIn(min = BAR_HEIGHT),
+    ) {
+        Column(Modifier.padding(horizontal = 16.dp, vertical = 8.dp), verticalArrangement = Arrangement.Center) {
+            status()
+            val body = buildAnnotatedString {
+                append(typed)
+                if (!live.isNullOrBlank()) {
+                    if (typed.isNotBlank()) append(" ")
+                    withStyle(SpanStyle(color = gray)) { append(live) }
+                }
+            }
+            if (body.isNotEmpty()) Text(body, maxLines = 4, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.bodyMedium)
+        }
+    }
+}
+
+private val BAR_HEIGHT = 56.dp
+private val COMPACT = PaddingValues(horizontal = 12.dp)
 
 private fun formatSec(sec: Int) = "%d:%02d".format(sec / 60, sec % 60)
 
