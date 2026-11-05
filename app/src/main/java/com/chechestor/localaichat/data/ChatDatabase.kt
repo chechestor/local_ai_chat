@@ -21,6 +21,10 @@ data class SessionEntity(
     val title: String,
     @ColumnInfo(name = "created_at") val createdAt: Long,
     @ColumnInfo(name = "last_message_at") val lastMessageAt: Long,
+    /** Сводка начала диалога для модели (F006); пользователю не показывается. */
+    @ColumnInfo(defaultValue = "") val summary: String = "",
+    /** id последнего сообщения, вошедшего в сводку (0 — сводки нет). */
+    @ColumnInfo(name = "summary_up_to", defaultValue = "0") val summaryUpTo: Long = 0,
 )
 
 /** Сообщение диалога. role — "user" или "assistant" (системный промпт не хранится). */
@@ -57,6 +61,12 @@ interface ChatDao {
     @Query("SELECT * FROM sessions WHERE id = :id")
     fun observeSession(id: Long): Flow<SessionEntity?>
 
+    @Query("SELECT * FROM sessions WHERE id = :id")
+    suspend fun getSession(id: Long): SessionEntity?
+
+    @Query("UPDATE sessions SET summary = :summary, summary_up_to = :upTo WHERE id = :id")
+    suspend fun updateSummary(id: Long, summary: String, upTo: Long)
+
     @Query("SELECT * FROM messages WHERE session_id = :sessionId ORDER BY id")
     fun observeMessages(sessionId: Long): Flow<List<MessageEntity>>
 
@@ -85,7 +95,7 @@ interface ChatDao {
     suspend fun deleteSession(id: Long)
 }
 
-@Database(entities = [SessionEntity::class, MessageEntity::class], version = 2, exportSchema = false)
+@Database(entities = [SessionEntity::class, MessageEntity::class], version = 3, exportSchema = false)
 abstract class ChatDatabase : RoomDatabase() {
     abstract fun chatDao(): ChatDao
 

@@ -11,6 +11,10 @@ class ChatRepository(private val db: ChatDatabase, private val now: () -> Long =
     fun session(id: Long): Flow<SessionEntity?> = dao.observeSession(id)
     fun messages(sessionId: Long): Flow<List<MessageEntity>> = dao.observeMessages(sessionId)
     suspend fun messageList(sessionId: Long): List<MessageEntity> = dao.messages(sessionId)
+    suspend fun getSession(id: Long): SessionEntity? = dao.getSession(id)
+
+    /** Сводка начала диалога (F006): [upTo] — id последнего сообщения, вошедшего в сводку. */
+    suspend fun saveSummary(sessionId: Long, summary: String, upTo: Long) = dao.updateSummary(sessionId, summary, upTo)
 
     /** Создаёт сессию с первым сообщением пользователя (пустые диалоги не сохраняются). */
     suspend fun createSession(firstUserText: String): Long = db.withTransaction {

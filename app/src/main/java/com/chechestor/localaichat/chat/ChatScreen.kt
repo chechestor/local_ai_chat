@@ -85,6 +85,7 @@ fun ChatScreen(onOpenSettings: () -> Unit, vm: ChatViewModel = viewModel()) {
     val active by vm.active.collectAsStateWithLifecycle()
     val engine by vm.engineState.collectAsStateWithLifecycle()
     val input by vm.input.collectAsStateWithLifecycle()
+    LaunchedEffect(Unit) { vm.messagesToUser.collect { snackbar.showSnackbar(it) } }
 
     ModalNavigationDrawer(
         drawerState = drawerState,
@@ -194,6 +195,7 @@ private fun MessageList(
                     text = if (streaming) active!!.answer else m.text,
                     thinking = if (streaming) active!!.thinking else m.thinking,
                     thinkingInProgress = streaming && active!!.thinkingInProgress,
+                    compressing = streaming && active!!.compressing,
                     streaming = streaming,
                     onCopy = onCopy,
                 )
@@ -220,10 +222,17 @@ private fun AssistantMessage(
     text: String,
     thinking: String,
     thinkingInProgress: Boolean,
+    compressing: Boolean,
     streaming: Boolean,
     onCopy: (String) -> Unit,
 ) {
     Column(Modifier.fillMaxWidth()) {
+        if (compressing) {
+            // F006: перед ответом длинная история пересказывается в сводку.
+            Text("Сжимаю историю…", style = MaterialTheme.typography.bodyMedium, fontStyle = FontStyle.Italic)
+            LinearProgressIndicator(Modifier.fillMaxWidth().padding(top = 4.dp))
+            return@Column
+        }
         if (thinkingInProgress || thinking.isNotEmpty()) {
             ThinkingBlock(thinking, thinkingInProgress)
         }

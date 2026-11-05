@@ -8,7 +8,10 @@ import com.chechestor.localaichat.data.MessageEntity
 import com.chechestor.localaichat.data.SessionEntity
 import com.chechestor.localaichat.llm.EngineState
 import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharedFlow
+import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -28,6 +31,10 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     /** Открытая сессия; null — новый (ещё не сохранённый) диалог. */
     private val _currentId = MutableStateFlow<Long?>(null)
     val currentId: StateFlow<Long?> = _currentId.asStateFlow()
+
+    private val _messagesToUser = MutableSharedFlow<String>(extraBufferCapacity = 4)
+    /** Короткие сообщения для пользователя (snackbar). */
+    val messagesToUser: SharedFlow<String> = _messagesToUser.asSharedFlow()
 
     private val _input = MutableStateFlow("")
     val input: StateFlow<String> = _input.asStateFlow()
@@ -72,9 +79,20 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         _input.value = ""
         val target = _currentId.value
         viewModelScope.launch {
-            val sid = controller.send(target, text)
-            // Пользователь мог за это время открыть другой диалог — не переключаем его.
-            if (_currentId.value == target) _currentId.value = sid
+            when (val r = controller.send(target, text)) {
+                is SendResult.Sent -> {
+                    // Пользователь мог за это время открыть другой диалог — не переключаем его.
+                    if (_currentId.value == target) _currentId.value = r.sessionId
+                }
+                SendResult.TooLong -> {
+                    if (_input.value.isEmpty()) _input.value = text
+                    _messagesToUser.tryEmit("Сообщение слишком длинное, сократите его")
+                }
+                SendResult.ModelUnavailable -> {
+                    if (_input.value.isEmpty()) _input.value = text
+                    _messagesToUser.tryEmit("Модель не загружена")
+                }
+            }
         }
     }
 
