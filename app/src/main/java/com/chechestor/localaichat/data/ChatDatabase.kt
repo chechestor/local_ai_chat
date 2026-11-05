@@ -40,6 +40,8 @@ data class MessageEntity(
     val role: String,
     val text: String,
     @ColumnInfo(name = "created_at") val createdAt: Long,
+    /** Размышления модели (F007): показываются свёрнутым блоком, в историю для модели не идут. */
+    @ColumnInfo(defaultValue = "") val thinking: String = "",
 ) {
     companion object {
         const val ROLE_USER = "user"
@@ -67,8 +69,8 @@ interface ChatDao {
     @Insert
     suspend fun insertMessage(message: MessageEntity): Long
 
-    @Query("UPDATE messages SET text = :text WHERE id = :id")
-    suspend fun updateMessageText(id: Long, text: String)
+    @Query("UPDATE messages SET text = :text, thinking = :thinking WHERE id = :id")
+    suspend fun updateMessage(id: Long, text: String, thinking: String)
 
     @Query("DELETE FROM messages WHERE id = :id")
     suspend fun deleteMessage(id: Long)
@@ -83,7 +85,7 @@ interface ChatDao {
     suspend fun deleteSession(id: Long)
 }
 
-@Database(entities = [SessionEntity::class, MessageEntity::class], version = 1, exportSchema = false)
+@Database(entities = [SessionEntity::class, MessageEntity::class], version = 2, exportSchema = false)
 abstract class ChatDatabase : RoomDatabase() {
     abstract fun chatDao(): ChatDao
 

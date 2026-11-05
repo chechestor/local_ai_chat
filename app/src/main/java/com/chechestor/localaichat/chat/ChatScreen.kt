@@ -3,7 +3,6 @@ package com.chechestor.localaichat.chat
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
-import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Arrangement
@@ -193,7 +192,7 @@ private fun MessageList(
                 val streaming = active?.messageId == m.id
                 AssistantMessage(
                     text = if (streaming) active!!.answer else m.text,
-                    thinking = if (streaming) active!!.thinking else "",
+                    thinking = if (streaming) active!!.thinking else m.thinking,
                     thinkingInProgress = streaming && active!!.thinkingInProgress,
                     streaming = streaming,
                     onCopy = onCopy,
@@ -226,19 +225,46 @@ private fun AssistantMessage(
 ) {
     Column(Modifier.fillMaxWidth()) {
         if (thinkingInProgress || thinking.isNotEmpty()) {
-            Text(
-                if (thinkingInProgress) "Размышляю…" else "Размышления",
-                style = MaterialTheme.typography.labelMedium,
-                fontStyle = FontStyle.Italic,
-            )
+            ThinkingBlock(thinking, thinkingInProgress)
         }
         if (text.isEmpty() && streaming) {
-            Text("…", style = MaterialTheme.typography.bodyLarge)
+            if (!thinkingInProgress) Text("…", style = MaterialTheme.typography.bodyLarge)
         } else {
             Markdown(content = text)
         }
         if (!streaming && text.isNotEmpty()) {
             TextButton(onClick = { onCopy(text) }) { Text("Копировать") }
+        }
+    }
+}
+
+/** Свёрнутый блок «Размышления» над ответом (F007): нажатие разворачивает и сворачивает. */
+@Composable
+private fun ThinkingBlock(thinking: String, inProgress: Boolean) {
+    var expanded by rememberSaveable { mutableStateOf(false) }
+    Surface(
+        shape = RoundedCornerShape(12.dp),
+        color = MaterialTheme.colorScheme.surfaceContainerHigh,
+        modifier = Modifier.fillMaxWidth().padding(bottom = 6.dp),
+    ) {
+        Column(
+            Modifier
+                .combinedClickable(onClick = { expanded = !expanded })
+                .padding(horizontal = 12.dp, vertical = 8.dp),
+        ) {
+            Text(
+                (if (expanded) "▾ " else "▸ ") + if (inProgress) "Размышляю…" else "Размышления",
+                style = MaterialTheme.typography.labelLarge,
+                fontStyle = FontStyle.Italic,
+            )
+            if (expanded && thinking.isNotEmpty()) {
+                Text(
+                    thinking,
+                    style = MaterialTheme.typography.bodySmall,
+                    fontStyle = FontStyle.Italic,
+                    modifier = Modifier.padding(top = 4.dp),
+                )
+            }
         }
     }
 }
@@ -280,7 +306,6 @@ private fun InputBar(
     }
 }
 
-@OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun SessionsDrawer(
     sessions: List<SessionEntity>,

@@ -1,11 +1,9 @@
 package com.chechestor.localaichat.chat
 
 import android.content.Context
-import com.chechestor.localaichat.LocalAiChatApp
 import com.chechestor.localaichat.data.ChatRepository
 import com.chechestor.localaichat.data.MessageEntity
 import com.chechestor.localaichat.llm.ChatMessage
-import com.chechestor.localaichat.llm.ChatRole
 import com.chechestor.localaichat.llm.EngineState
 import com.chechestor.localaichat.llm.FinishReason
 import com.chechestor.localaichat.llm.GenerationEvent
@@ -13,6 +11,7 @@ import com.chechestor.localaichat.llm.GenerationParams
 import com.chechestor.localaichat.llm.LlmEngine
 import com.chechestor.localaichat.llm.ThinkingParser
 import com.chechestor.localaichat.models.ModelStore
+import com.chechestor.localaichat.settings.SettingsRepository
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -45,6 +44,7 @@ class ChatController(
     private val repo: ChatRepository,
     private val engine: LlmEngine,
     private val models: ModelStore,
+    private val settings: SettingsRepository,
     private val scope: CoroutineScope,
 ) {
     private val _active = MutableStateFlow<ActiveGeneration?>(null)
@@ -75,25 +75,17 @@ class ChatController(
      * Текущая генерация (в любом диалоге) останавливается, её частичный ответ сохраняется.
      * Возвращает id сессии.
      */
-    suspend fun send(sessionId: Long?, text: String, thinking: Boolean = false): Long = sendMutex.withLock {
+    suspend fun send(sessionId: Long?, text: String): Long = sendMutex.withLock {
         stopAndJoin()
+        // Режим размышлений берётся из настроек на момент отправки (F007).
+        val thinking = settings.thinkingNow()
         val sid = sessionId ?: repo.createSession(text)
         repo.addMessage(sid, MessageEntity.ROLE_USER, text)
-        val history = buildHistory(repo.messageList(sid))
+        val history = ModelHistory.build(repo.messageList(sid))
         val messageId = repo.addMessage(sid, MessageEntity.ROLE_ASSISTANT, "")
         _active.value = ActiveGeneration(sid, messageId, "", thinkingInProgress = thinking)
         job = scope.launch { generate(sid, messageId, history, thinking) }
         sid
-    }
-
-    /** История для модели: системный промпт + сообщения сессии (сжатие длинной истории — F006). */
-    private fun buildHistory(messages: List<MessageEntity>): List<ChatMessage> = buildList {
-        add(ChatMessage(ChatRole.SYSTEM, LocalAiChatApp.SYSTEM_PROMPT))
-        for (m in messages) {
-            if (m.text.isBlank()) continue
-            val role = if (m.role == MessageEntity.ROLE_USER) ChatRole.USER else ChatRole.ASSISTANT
-            add(ChatMessage(role, m.text))
-        }
     }
 
     private suspend fun generate(sessionId: Long, messageId: Long, history: List<ChatMessage>, thinking: Boolean) {
@@ -103,7 +95,8 @@ class ChatController(
         try {
             if (loadModel() !is EngineState.Ready) return
             var lastSave = System.currentTimeMillis()
-            engine.generate(history, GenerationParams(thinking = thinking)).collect { ev ->
+            val params = GenerationParams(thinking = thinking, maxTokens = if (thinking) MAX_TOKENS_THINKING else MAX_TOKENS)
+            engine.generate(history, params).collect { ev ->
                 when (ev) {
                     is GenerationEvent.Text -> {
                         raw.append(ev.piece)
@@ -112,7 +105,7 @@ class ChatController(
                         val now = System.currentTimeMillis()
                         if (now - lastSave > SAVE_INTERVAL_MS) {
                             lastSave = now
-                            repo.updateMessageText(messageId, p.answer)
+                            repo.updateMessage(messageId, p.answer, p.thinking)
                         }
                     }
                     is GenerationEvent.Finished -> reason = ev.reason
@@ -120,14 +113,18 @@ class ChatController(
             }
         } finally {
             withContext(NonCancellable) {
-                val answer = ThinkingParser.parse(raw.toString()).answer.trimEnd()
+                val parsed = ThinkingParser.parse(raw.toString())
+                val answer = parsed.answer.trimEnd()
                 val text = when {
                     answer.isNotEmpty() -> answer
                     reason == FinishReason.PROMPT_TOO_LONG -> "⚠ История диалога не помещается в контекст модели. Начните новый диалог."
                     reason == FinishReason.ERROR -> "⚠ Модель не смогла ответить."
+                    reason == FinishReason.LENGTH && parsed.thinking.isNotEmpty() ->
+                        "⚠ Размышления заняли весь лимит ответа. Спросите короче или выключите размышления."
                     else -> ""
                 }
-                if (text.isEmpty()) repo.deleteMessage(messageId) else repo.updateMessageText(messageId, text)
+                if (text.isEmpty() && parsed.thinking.isEmpty()) repo.deleteMessage(messageId)
+                else repo.updateMessage(messageId, text, parsed.thinking)
                 if (_active.value?.messageId == messageId) _active.value = null
                 GenerationService.stop(context)
             }
@@ -153,5 +150,9 @@ class ChatController(
 
     companion object {
         private const val SAVE_INTERVAL_MS = 2_000L
+        /** Лимит ответа без размышлений (бюджет контекста F006). */
+        const val MAX_TOKENS = 512
+        /** С размышлениями ответ длиннее: размышления тоже тратят токены. */
+        const val MAX_TOKENS_THINKING = 1024
     }
 }

@@ -25,7 +25,7 @@ class ChatRepository(private val db: ChatDatabase, private val now: () -> Long =
         id
     }
 
-    suspend fun updateMessageText(id: Long, text: String) = dao.updateMessageText(id, text)
+    suspend fun updateMessage(id: Long, text: String, thinking: String = "") = dao.updateMessage(id, text, thinking)
 
     suspend fun deleteMessage(id: Long) = dao.deleteMessage(id)
 

@@ -6,6 +6,7 @@ import com.chechestor.localaichat.data.ChatDatabase
 import com.chechestor.localaichat.data.ChatRepository
 import com.chechestor.localaichat.llm.LlmEngine
 import com.chechestor.localaichat.models.ModelStore
+import com.chechestor.localaichat.settings.SettingsRepository
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -22,7 +23,9 @@ class LocalAiChatApp : Application() {
 
     val chatRepository: ChatRepository by lazy { ChatRepository(ChatDatabase.create(this)) }
 
-    val chat: ChatController by lazy { ChatController(this, chatRepository, llm, models, appScope) }
+    val settings: SettingsRepository by lazy { SettingsRepository(this) }
+
+    val chat: ChatController by lazy { ChatController(this, chatRepository, llm, models, settings, appScope) }
 
     companion object {
         /** Системный промпт (F004 п. 10): фиксирован, пользователю не виден. */
