@@ -32,6 +32,7 @@ internal object LlamaNative {
         temperature: Float,
         topK: Int,
         topP: Float,
+        presencePenalty: Float,
         seed: Int,
         callback: BytesCallback,
     ): Int

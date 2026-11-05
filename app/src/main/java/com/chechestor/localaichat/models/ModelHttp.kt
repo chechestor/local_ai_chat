@@ -22,6 +22,15 @@ object ModelHttp {
         }
     }
 
+    /** Откуда можно начинать загрузку (F008 п. 13): Hugging Face и сайт Vosk. */
+    private val ORIGIN_HOSTS = setOf("huggingface.co", "alphacephei.com")
+
+    /** Можно ли начинать загрузку с [url]: только https и только хосты источников. */
+    fun isAllowedUrl(url: String): Boolean = runCatching {
+        val u = URL(url)
+        u.protocol == "https" && u.host.lowercase() in ORIGIN_HOSTS && u.userInfo == null
+    }.getOrDefault(false)
+
     /** Полный размер файла из заголовка `Content-Range: bytes 100-999/1000`; null, если не разобрать. */
     fun totalFromContentRange(header: String?): Long? =
         header?.substringAfterLast('/', "")?.trim()?.toLongOrNull()

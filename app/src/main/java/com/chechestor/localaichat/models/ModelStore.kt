@@ -7,29 +7,44 @@ import android.os.Environment
 import android.os.ParcelFileDescriptor
 import android.os.StatFs
 import android.provider.DocumentsContract
+import android.util.Log
 import androidx.core.content.edit
 import androidx.documentfile.provider.DocumentFile
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import org.json.JSONArray
+import org.json.JSONObject
 import java.io.File
 import java.io.IOException
 import java.io.InputStream
 import java.security.MessageDigest
 import java.util.zip.ZipInputStream
 
-/** Состояние одной модели в папке. */
-data class ModelStatus(val spec: ModelSpec, val present: Boolean, val partialBytes: Long)
+/** Состояние одного файла модели в папке. [llm] — для языковых моделей. */
+data class ModelStatus(
+    val spec: ModelSpec,
+    val present: Boolean,
+    val partialBytes: Long,
+    val llm: LlmModel? = null,
+)
 
 /** Итог проверки папки моделей при запуске. */
 sealed interface FolderCheck {
     /** Папка не выбрана, доступа нет или выбрана не та папка. */
     data class NeedFolder(val wrongFolder: Boolean) : FolderCheck
-    data class Missing(val models: List<ModelStatus>) : FolderCheck
-    data object Ready : FolderCheck
+
+    /** Нет Vosk или ни одной языковой модели: экран «Установка моделей». */
+    data class Missing(val models: List<ModelStatus>, val vosk: ModelStatus) : FolderCheck
+
+    /** Vosk на месте, [downloaded] — проверенные языковые модели (хотя бы одна). */
+    data class Ready(val downloaded: List<LlmModel>) : FolderCheck
 }
 
+/** Содержимое `Download/LocalAIChat/models.json` (F009 п. 3, F010 п. 8). */
+data class ModelsFile(val active: String?, val custom: List<LlmModel>)
+
 /**
- * Папка `Download/LocalAIChat` (SAF) и файлы моделей в ней (F008).
+ * Папка `Download/LocalAIChat` (SAF) и файлы моделей в ней (F008, F009).
  * Файлы в общей папке переживают удаление приложения; доступ к папке выдаётся заново после переустановки.
  */
 class ModelStore(context: Context) {
@@ -65,38 +80,110 @@ class ModelStore(context: Context) {
     /** Путь к папке для показа в настройках (F007). */
     fun folderDisplayPath(): String = "${Environment.DIRECTORY_DOWNLOADS}/$FOLDER_NAME"
 
+    // --- models.json ---
+
+    /** Читает `models.json`; файла нет или он битый — пустой список. */
+    suspend fun readModelsFile(): ModelsFile = withContext(Dispatchers.IO) {
+        val dir = folder() ?: return@withContext ModelsFile(null, emptyList())
+        readModelsFile(dir)
+    }
+
+    private fun readModelsFile(dir: DocumentFile): ModelsFile {
+        val f = dir.findFile(MODELS_JSON) ?: return ModelsFile(null, emptyList())
+        return runCatching {
+            val text = app.contentResolver.openInputStream(f.uri)?.use { it.readBytes().toString(Charsets.UTF_8) }
+                ?: return ModelsFile(null, emptyList())
+            decodeModelsFile(text)
+        }.getOrElse {
+            Log.w(TAG, "models.json не прочитан: ${it.message}")
+            ModelsFile(null, emptyList())
+        }
+    }
+
+    private suspend fun writeModelsFile(update: (ModelsFile) -> ModelsFile) = withContext(Dispatchers.IO) {
+        val dir = folder() ?: return@withContext
+        val next = update(readModelsFile(dir))
+        val f = dir.findFile(MODELS_JSON) ?: dir.createFile("application/json", MODELS_JSON) ?: return@withContext
+        runCatching {
+            app.contentResolver.openOutputStream(f.uri, "wt")?.use { it.write(encodeModelsFile(next).toByteArray(Charsets.UTF_8)) }
+        }.onFailure { Log.w(TAG, "models.json не записан: ${it.message}") }
+    }
+
+    /** Активная модель в `models.json` (восстанавливается после переустановки, F009 п. 3). */
+    suspend fun writeActive(id: String?) = writeModelsFile { it.copy(active = id) }
+
+    /** Добавляет модель, скачанную по названию (F010 п. 8). */
+    suspend fun addCustom(model: LlmModel) = writeModelsFile { f ->
+        f.copy(custom = f.custom.filter { it.id != model.id } + model)
+    }
+
+    /** Все языковые модели, которые знает приложение: каталог + `models.json` (F009 п. 5). */
+    suspend fun languageModels(): List<LlmModel> = ModelCatalog.LANGUAGE + readModelsFile().custom
+
+    suspend fun findModel(id: String): LlmModel? = languageModels().firstOrNull { it.id == id }
+
     // --- Проверка ---
 
     /**
      * Проверяет модели: наличие и размер — всегда; SHA-256 — при первой проверке после установки
-     * (результат запоминается до переустановки). [onProgress] — доля проверенного объёма 0..1.
+     * (результат запоминается до переустановки). Битые файлы удаляются. [onProgress] — доля проверенного объёма 0..1.
      */
     suspend fun check(onProgress: (Float) -> Unit = {}): FolderCheck = withContext(Dispatchers.IO) {
         val hadTree = prefs.contains(KEY_TREE)
         val dir = folder() ?: return@withContext FolderCheck.NeedFolder(wrongFolder = hadTree)
-        val statuses = ModelCatalog.ALL.map { spec ->
-            val f = dir.findFile(spec.fileName)
-            val part = dir.findFile(partName(spec))
-            ModelStatus(spec, present = f != null && f.length() == spec.sizeBytes, partialBytes = part?.length() ?: 0L)
-        }
-        if (statuses.any { !it.present }) return@withContext FolderCheck.Missing(statuses)
+        val files = dir.listFiles().associateBy { it.name }
+        val llms = ModelCatalog.LANGUAGE + readModelsFile(dir).custom
 
-        val toHash = ModelCatalog.ALL.filter { !isVerified(it, dir.findFile(it.fileName)!!) }
-        val total = toHash.sumOf { it.sizeBytes }.coerceAtLeast(1)
-        var done = 0L
-        for (spec in toHash) {
-            val file = dir.findFile(spec.fileName)!!
-            val ok = sha256(file.uri) { n -> onProgress(((done + n).toFloat() / total).coerceIn(0f, 1f)) } == spec.sha256
-            done += spec.sizeBytes
-            if (!ok) {
-                // Подменённый или битый файл удаляем — модель будет скачана заново.
-                file.delete()
-                return@withContext FolderCheck.Missing(statuses.map { if (it.spec == spec) it.copy(present = false) else it })
-            }
-            markVerified(spec, file)
+        fun status(spec: ModelSpec, llm: LlmModel?): ModelStatus {
+            val f = files[spec.fileName]
+            return ModelStatus(
+                spec,
+                present = f != null && f.length() == spec.sizeBytes,
+                partialBytes = files[partName(spec)]?.length() ?: 0L,
+                llm = llm,
+            )
         }
+
+        var statuses = llms.map { status(it.spec, it) }
+        var vosk = status(ModelCatalog.VOSK, null)
+
+        val toHash = (statuses + vosk).filter { it.present && !isVerified(it.spec, files.getValue(it.spec.fileName)) }
+        val total = toHash.sumOf { it.spec.sizeBytes }.coerceAtLeast(1)
+        var done = 0L
+        for (st in toHash) {
+            val file = files.getValue(st.spec.fileName)
+            val ok = sha256(file.uri) { n -> onProgress(((done + n).toFloat() / total).coerceIn(0f, 1f)) } == st.spec.sha256
+            done += st.spec.sizeBytes
+            if (ok) {
+                markVerified(st.spec, file)
+            } else {
+                // Подменённый или битый файл удаляем — модель можно скачать заново.
+                Log.w(TAG, "SHA-256 не совпал: ${st.spec.fileName}")
+                file.delete()
+                if (st.spec == vosk.spec) vosk = vosk.copy(present = false)
+                else statuses = statuses.map { if (it.spec == st.spec) it.copy(present = false) else it }
+            }
+        }
+
+        val downloaded = statuses.filter { it.present }.mapNotNull { it.llm }
+        if (!vosk.present || downloaded.isEmpty()) return@withContext FolderCheck.Missing(statuses, vosk)
         prepareVosk(dir)
-        FolderCheck.Ready
+        FolderCheck.Ready(downloaded)
+    }
+
+    /** Состояние языковых моделей в папке без проверки SHA-256 (настройки, F009 п. 5). */
+    suspend fun scanLanguageModels(): List<ModelStatus> = withContext(Dispatchers.IO) {
+        val dir = folder() ?: return@withContext emptyList()
+        val files = dir.listFiles().associateBy { it.name }
+        (ModelCatalog.LANGUAGE + readModelsFile(dir).custom).map { m ->
+            val f = files[m.spec.fileName]
+            ModelStatus(
+                m.spec,
+                present = f != null && f.length() == m.spec.sizeBytes,
+                partialBytes = files[partName(m.spec)]?.length() ?: 0L,
+                llm = m,
+            )
+        }
     }
 
     private fun signature(file: DocumentFile) = "${file.length()}:${file.lastModified()}"
@@ -124,18 +211,19 @@ class ModelStore(context: Context) {
 
     // --- Свободное место ---
 
-    /** Сколько ещё нужно места для загрузки недостающих моделей (вместе с запасом). */
-    fun requiredBytes(statuses: List<ModelStatus>): Long =
-        statuses.filter { !it.present }.sumOf { (it.spec.sizeBytes - it.partialBytes).coerceAtLeast(0) } +
-            ModelCatalog.VOSK_UNPACKED_BYTES + ModelCatalog.FREE_SPACE_RESERVE
+    /** Сколько места нужно для загрузки [toDownload] (вместе с распакованным Vosk, если он качается, и запасом). */
+    fun requiredBytes(toDownload: List<ModelStatus>): Long =
+        toDownload.filter { !it.present }.sumOf { (it.spec.sizeBytes - it.partialBytes).coerceAtLeast(0) } +
+            (if (toDownload.any { it.spec.id == ModelCatalog.VOSK.id && !it.present }) ModelCatalog.VOSK_UNPACKED_BYTES else 0L) +
+            ModelCatalog.FREE_SPACE_RESERVE
 
     fun freeBytes(): Long = runCatching { StatFs(Environment.getExternalStorageDirectory().path).availableBytes }.getOrDefault(Long.MAX_VALUE)
 
     // --- Файлы для движков ---
 
-    /** Дескриптор файла Qwen для llama.cpp (без копирования, F003). Закрывает вызывающий. */
-    fun openQwen(): ParcelFileDescriptor? {
-        val f = folder()?.findFile(ModelCatalog.QWEN.fileName) ?: return null
+    /** Дескриптор файла языковой модели для llama.cpp (без копирования, F003). Закрывает вызывающий. */
+    fun openModel(model: LlmModel): ParcelFileDescriptor? {
+        val f = folder()?.findFile(model.spec.fileName) ?: return null
         return app.contentResolver.openFileDescriptor(f.uri, "r")
     }
 
@@ -171,22 +259,33 @@ class ModelStore(context: Context) {
         tmp.deleteRecursively()
     }
 
-    // --- Удаление (настройки, F007) ---
+    // --- Удаление ---
 
-    /** Удаляет файлы моделей в папке (и распакованный Vosk). Диалоги не трогает. */
+    /** Удаляет одну языковую модель (файл, `.part`, запись в `models.json` для добавленных по названию). */
+    suspend fun deleteModel(model: LlmModel) = withContext(Dispatchers.IO) {
+        folder()?.let { dir ->
+            dir.findFile(model.spec.fileName)?.delete()
+            dir.findFile(partName(model.spec))?.delete()
+        }
+        prefs.edit { remove(KEY_VERIFIED + model.id) }
+        if (model.custom) writeModelsFile { f -> f.copy(custom = f.custom.filter { it.id != model.id }) }
+    }
+
+    /** «Удалить и скачать заново» (F009 п. 5): все модели, `.part`, `models.json` и распакованный Vosk. Диалоги не трогает. */
     suspend fun deleteModels() = withContext(Dispatchers.IO) {
         folder()?.let { dir ->
-            for (spec in ModelCatalog.ALL) {
-                dir.findFile(spec.fileName)?.delete()
-                dir.findFile(partName(spec))?.delete()
-            }
+            val specs = ModelCatalog.ALL + readModelsFile(dir).custom.map { it.spec }
+            val names = specs.flatMap { listOf(it.fileName, partName(it)) }.toSet() + MODELS_JSON
+            for (f in dir.listFiles()) if (f.name in names) f.delete()
         }
-        prefs.edit { ModelCatalog.ALL.forEach { remove(KEY_VERIFIED + it.id) } }
+        prefs.edit { prefs.all.keys.filter { it.startsWith(KEY_VERIFIED) }.forEach { remove(it) } }
         File(app.filesDir, "vosk").deleteRecursively()
     }
 
     companion object {
         const val FOLDER_NAME = "LocalAIChat"
+        const val MODELS_JSON = "models.json"
+        private const val TAG = "ModelStore"
         private const val EXTERNAL_STORAGE_AUTHORITY = "com.android.externalstorage.documents"
         private const val KEY_TREE = "tree_uri"
         private const val KEY_VERIFIED = "verified_"
@@ -202,5 +301,70 @@ class ModelStore(context: Context) {
 
         internal fun isExpectedDocId(docId: String): Boolean =
             docId.trimEnd('/').equals("primary:Download/$FOLDER_NAME", ignoreCase = true)
+
+        /** Модель, добавленная по названию (F010): запись `models.json` → модель приложения. */
+        fun customModel(repo: String, commit: String, file: String, sizeBytes: Long, sha256: String, title: String): LlmModel {
+            val local = customFileName(repo, file)
+            return LlmModel(
+                spec = ModelSpec(
+                    id = "hf:$local",
+                    title = title,
+                    fileName = local,
+                    url = "https://huggingface.co/$repo/resolve/$commit/$file",
+                    sizeBytes = sizeBytes,
+                    sha256 = sha256,
+                ),
+                note = "Добавлена по названию",
+                format = ChatFormat.EMBEDDED,
+                supportsThinking = false,
+                sampling = ModelCatalog.CUSTOM_SAMPLING,
+                custom = true,
+                repo = repo,
+                commit = commit,
+            )
+        }
+
+        /** Имя файла в папке: `<владелец>__<файл>`, чтобы не совпасть с файлами каталога (F010 п. 7). */
+        fun customFileName(repo: String, file: String): String = repo.substringBefore('/') + "__" + file
+
+        private fun encodeModelsFile(f: ModelsFile): String {
+            val root = JSONObject()
+            root.put("active", f.active ?: JSONObject.NULL)
+            val arr = JSONArray()
+            for (m in f.custom) {
+                arr.put(
+                    JSONObject()
+                        .put("repo", m.repo)
+                        .put("commit", m.commit)
+                        .put("file", m.spec.url.substringAfterLast('/'))
+                        .put("size", m.spec.sizeBytes)
+                        .put("sha256", m.spec.sha256)
+                        .put("title", m.title)
+                        .put("addedByName", true),
+                )
+            }
+            root.put("custom", arr)
+            return root.toString(2)
+        }
+
+        private fun decodeModelsFile(text: String): ModelsFile {
+            val root = JSONObject(text)
+            val active = if (root.isNull("active")) null else root.optString("active").ifEmpty { null }
+            val custom = mutableListOf<LlmModel>()
+            val arr = root.optJSONArray("custom") ?: JSONArray()
+            for (i in 0 until arr.length()) {
+                val o = arr.optJSONObject(i) ?: continue
+                val repo = o.optString("repo")
+                val commit = o.optString("commit")
+                val file = o.optString("file")
+                val sha = o.optString("sha256")
+                val size = o.optLong("size", -1)
+                // Только записи с репозиторием Hugging Face, коммитом и контрольной суммой.
+                if (!HfNames.isRepoId(repo) || commit.isEmpty() || file.isEmpty() || sha.length != 64 || size <= 0) continue
+                if (file.contains('/') || file.contains("..")) continue
+                custom += customModel(repo, commit, file, size, sha, o.optString("title").ifEmpty { file })
+            }
+            return ModelsFile(active, custom)
+        }
     }
 }

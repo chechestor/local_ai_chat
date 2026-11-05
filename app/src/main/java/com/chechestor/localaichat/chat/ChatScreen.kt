@@ -159,7 +159,8 @@ fun ChatScreen(onOpenSettings: () -> Unit, vm: ChatViewModel = viewModel()) {
                     onText = vm::onInput,
                     onClear = vm::clearInput,
                     generating = generatingHere,
-                    canSend = engine !is EngineState.Failed,
+                    // Пока модель грузится (в том числе после «Применить»), отправить нельзя (F009 п. 6).
+                    canSend = engine !is EngineState.Failed && engine !is EngineState.Loading,
                     onSend = vm::send,
                     onStop = vm::stop,
                     voice = voice,
@@ -177,8 +178,11 @@ fun ChatScreen(onOpenSettings: () -> Unit, vm: ChatViewModel = viewModel()) {
 @Composable
 private fun EngineBanner(engine: EngineState) {
     when (engine) {
-        EngineState.Loading, EngineState.NotLoaded -> Column(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp)) {
-            Text("Загрузка модели…", style = MaterialTheme.typography.bodySmall)
+        is EngineState.Loading, EngineState.NotLoaded -> Column(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp)) {
+            Text(
+                if (engine is EngineState.Loading) "Загружаю ${engine.title}…" else "Загрузка модели…",
+                style = MaterialTheme.typography.bodySmall,
+            )
             LinearProgressIndicator(Modifier.fillMaxWidth())
         }
         is EngineState.Failed -> Text(

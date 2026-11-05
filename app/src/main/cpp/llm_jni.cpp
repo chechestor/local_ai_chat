@@ -209,7 +209,8 @@ JNIEXPORT jint JNICALL
 Java_com_chechestor_localaichat_llm_LlamaNative_generate(JNIEnv *env, jobject, jlong handle,
                                                          jbyteArray promptUtf8, jint maxTokens,
                                                          jfloat temperature, jint topK, jfloat topP,
-                                                         jint seed, jobject callback) {
+                                                         jfloat presencePenalty, jint seed,
+                                                         jobject callback) {
     Engine *e = from_handle(handle);
     if (!e) return ERR_BAD_HANDLE;
     e->stop.store(false);
@@ -256,6 +257,12 @@ Java_com_chechestor_localaichat_llm_LlamaNative_generate(JNIEnv *env, jobject, j
 
     llama_sampler *smpl = llama_sampler_chain_init(llama_sampler_chain_default_params());
     if (topK > 0) llama_sampler_chain_add(smpl, llama_sampler_init_top_k(topK));
+    if (presencePenalty != 0.0f) {
+        // Штраф за повтор уже сказанного в ответе (Qwen3.5, F009 п. 7); окно — весь контекст.
+        // После top-k: на полном словаре штраф медленный (llama.h).
+        llama_sampler_chain_add(smpl, llama_sampler_init_penalties(
+                llama_vocab_n_tokens(e->vocab), nCtx, 1.0f, 0.0f, presencePenalty));
+    }
     if (topP > 0.0f && topP < 1.0f) llama_sampler_chain_add(smpl, llama_sampler_init_top_p(topP, 1));
     llama_sampler_chain_add(smpl, llama_sampler_init_temp(temperature));
     llama_sampler_chain_add(smpl, llama_sampler_init_dist((uint32_t) seed));

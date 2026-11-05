@@ -43,8 +43,8 @@ class ModelCatalogTest {
             assertEquals(64, m.sha256.length)
             assertTrue(m.sizeBytes > 0)
         }
-        // Ссылка Qwen — на коммит, а не на ветку main.
-        assertFalse(ModelCatalog.QWEN.url.contains("/resolve/main/"))
+        // Ссылки Hugging Face — на коммит, а не на ветку main.
+        assertFalse(ModelCatalog.ALL.any { it.url.contains("/resolve/main/") })
     }
 }
 

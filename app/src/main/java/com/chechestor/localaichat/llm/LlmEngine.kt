@@ -2,6 +2,7 @@ package com.chechestor.localaichat.llm
 
 import android.os.ParcelFileDescriptor
 import android.os.SystemClock
+import com.chechestor.localaichat.models.LlmModel
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.asCoroutineDispatcher
 import kotlinx.coroutines.isActive
@@ -19,8 +20,9 @@ import java.util.concurrent.Executors
 /** Состояние движка LLM. */
 sealed interface EngineState {
     data object NotLoaded : EngineState
-    data object Loading : EngineState
-    data class Ready(val loadMillis: Long, val contextSize: Int) : EngineState
+    /** Модель грузится: «Загружаю <название>…» (F009 п. 6). */
+    data class Loading(val title: String) : EngineState
+    data class Ready(val model: LlmModel, val loadMillis: Long, val contextSize: Int) : EngineState
     data class Failed(val message: String) : EngineState
 }
 
@@ -42,18 +44,33 @@ data class GenerationStats(
     val tokensPerSecond: Double,
 )
 
-/** Параметры генерации. По умолчанию — рекомендации Qwen3 для режима без размышлений. */
+/** Параметры генерации; сэмплинг — из карточки модели (F009 п. 7). */
 data class GenerationParams(
     val thinking: Boolean = false,
     val maxTokens: Int = 512,
-    val temperature: Float = if (thinking) 0.6f else 0.7f,
+    val temperature: Float = 0.7f,
     val topK: Int = 20,
-    val topP: Float = if (thinking) 0.95f else 0.8f,
+    val topP: Float = 0.8f,
+    val presencePenalty: Float = 0f,
     val seed: Int = (System.nanoTime() and 0x7fffffff).toInt(),
-)
+) {
+    companion object {
+        fun of(model: LlmModel, thinking: Boolean, maxTokens: Int, temperature: Float? = null): GenerationParams {
+            val s = model.sampling(thinking)
+            return GenerationParams(
+                thinking = thinking,
+                maxTokens = maxTokens,
+                temperature = temperature ?: s.temperature,
+                topK = s.topK,
+                topP = s.topP,
+                presencePenalty = s.presencePenalty,
+            )
+        }
+    }
+}
 
 /**
- * Движок Qwen на llama.cpp (F003). Все обращения к нативному коду идут в одном фоновом потоке,
+ * Движок языковой модели на llama.cpp (F003, F009). В памяти одна модель. Все обращения к нативному коду идут в одном фоновом потоке,
  * поэтому интерфейс не зависает, а загрузка, генерация и освобождение не пересекаются.
  * Одновременно идёт одна генерация.
  */
@@ -71,12 +88,20 @@ class LlmEngine(
 
     @Volatile
     private var handle = 0L
+
+    /** Загруженная модель (шаблон чата и сэмплинг). */
+    @Volatile
+    var model: LlmModel? = null
+        private set
     private var backendReady = false
 
-    /** Загружает модель из открытого дескриптора (файл или документ из папки моделей). Дескриптор не закрывает. */
-    suspend fun load(fd: ParcelFileDescriptor): EngineState = withContext(dispatcher) {
+    /**
+     * Загружает [llm] из открытого дескриптора (файл или документ из папки моделей). Дескриптор не закрывает.
+     * Прежнюю модель нужно сначала выгрузить ([unload]): две модели в памяти не держим.
+     */
+    suspend fun load(fd: ParcelFileDescriptor, llm: LlmModel): EngineState = withContext(dispatcher) {
         if (handle != 0L) return@withContext _state.value
-        _state.value = EngineState.Loading
+        _state.value = EngineState.Loading(llm.title)
         val started = SystemClock.elapsedRealtime()
         val result = try {
             if (!backendReady) {
@@ -85,16 +110,22 @@ class LlmEngine(
             }
             val h = LlamaNative.loadModel(fd.fd, contextSize, threads, quantizeKv)
             if (h == 0L) {
-                EngineState.Failed("Не удалось загрузить модель: файл повреждён или не подходит")
+                EngineState.Failed("Не удалось загрузить ${llm.title}: файл повреждён или модель не поддерживается")
             } else {
                 handle = h
-                EngineState.Ready(SystemClock.elapsedRealtime() - started, LlamaNative.contextSize(h))
+                model = llm
+                EngineState.Ready(llm, SystemClock.elapsedRealtime() - started, LlamaNative.contextSize(h))
             }
         } catch (t: Throwable) {
-            EngineState.Failed("Ошибка загрузки модели: ${t.message ?: t.javaClass.simpleName}")
+            EngineState.Failed("Не удалось загрузить ${llm.title}: ${t.message ?: t.javaClass.simpleName}")
         }
         _state.value = result
         result
+    }
+
+    /** Ошибка до обращения к движку (нет файла, не хватит памяти): показывается вместо «Загружаю…». */
+    fun reportFailure(message: String) {
+        if (handle == 0L) _state.value = EngineState.Failed(message)
     }
 
     /** Число токенов в тексте (для бюджета контекста, F006). */
@@ -104,8 +135,15 @@ class LlmEngine(
         LlamaNative.countTokens(h, text.toByteArray(Charsets.UTF_8))
     }
 
+    /** Промпт по шаблону загруженной модели (для подсчёта токенов, F006). */
+    fun buildPrompt(messages: List<ChatMessage>, thinking: Boolean): String {
+        val m = model ?: error("Модель не загружена")
+        return ChatTemplates.build(m.format, messages, thinking && m.supportsThinking)
+            ?: error("Шаблон чата модели не поддерживается")
+    }
+
     /**
-     * Генерирует ответ на историю [messages] (системное, пользователь, ассистент) по шаблону Qwen.
+     * Генерирует ответ на историю [messages] (системное, пользователь, ассистент) по шаблону модели.
      * Отмена сбора потока (или [stop]) прерывает генерацию.
      */
     fun generate(messages: List<ChatMessage>, params: GenerationParams = GenerationParams()): Flow<GenerationEvent> =
@@ -116,13 +154,13 @@ class LlmEngine(
                 close()
                 return@callbackFlow
             }
-            val prompt = QwenChatTemplate.build(messages, params.thinking).toByteArray(Charsets.UTF_8)
+            val prompt = buildPrompt(messages, params.thinking).toByteArray(Charsets.UTF_8)
             val promptTokens = LlamaNative.countTokens(h, prompt)
             val started = SystemClock.elapsedRealtime()
             var firstAt = -1L
             var chunks = 0
             val rc = LlamaNative.generate(
-                h, prompt, params.maxTokens, params.temperature, params.topK, params.topP, params.seed,
+                h, prompt, params.maxTokens, params.temperature, params.topK, params.topP, params.presencePenalty, params.seed,
             ) { bytes ->
                 if (firstAt < 0) firstAt = SystemClock.elapsedRealtime()
                 chunks++
@@ -157,6 +195,7 @@ class LlmEngine(
         val h = handle
         if (h != 0L) {
             handle = 0L
+            model = null
             LlamaNative.free(h)
         }
         _state.value = EngineState.NotLoaded

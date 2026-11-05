@@ -1,6 +1,8 @@
 package com.chechestor.localaichat.chat
 
+import android.app.ActivityManager
 import android.content.Context
+import android.util.Log
 import com.chechestor.localaichat.LocalAiChatApp
 import com.chechestor.localaichat.data.ChatRepository
 import com.chechestor.localaichat.data.MessageEntity
@@ -10,6 +12,9 @@ import com.chechestor.localaichat.llm.FinishReason
 import com.chechestor.localaichat.llm.GenerationEvent
 import com.chechestor.localaichat.llm.GenerationParams
 import com.chechestor.localaichat.llm.LlmEngine
+import com.chechestor.localaichat.llm.ProcessMemory
+import com.chechestor.localaichat.models.LlmModel
+import com.chechestor.localaichat.models.ModelCatalog
 import com.chechestor.localaichat.llm.ThinkingParser
 import com.chechestor.localaichat.models.ModelStore
 import com.chechestor.localaichat.settings.SettingsRepository
@@ -36,6 +41,14 @@ data class ActiveGeneration(
     /** Идёт сжатие истории перед ответом (F006): «Сжимаю историю…». */
     val compressing: Boolean = false,
 )
+
+/** Результат «Применить» (F009 п. 6). */
+sealed interface ApplyResult {
+    data object Ok : ApplyResult
+    /** Идёт ответ или сжатие — смена модели недоступна. */
+    data object Busy : ApplyResult
+    data class Failed(val message: String) : ApplyResult
+}
 
 /** Результат отправки сообщения. */
 sealed interface SendResult {
@@ -75,21 +88,85 @@ class ChatController(
         countTokens = { engine.countTokens(it) },
         contextSize = LlmEngine.DEFAULT_CONTEXT,
         systemPrompt = LocalAiChatApp.SYSTEM_PROMPT,
+        buildPrompt = { messages, thinking -> engine.buildPrompt(messages, thinking) },
     )
 
-    /** Загружает модель в фоне один раз за запуск (после F008). */
+    /** Загружает активную модель в фоне один раз за запуск (после F008). */
     fun ensureModelLoaded() {
         scope.launch { loadModel() }
     }
 
-    /** Загружает модель, если ещё не загружена, и возвращает состояние движка. */
+    /** Загружает активную модель, если ещё не загружена, и возвращает состояние движка. */
     private suspend fun loadModel(): EngineState = loadMutex.withLock {
         val s = engine.state.value
         if (s is EngineState.Ready) return@withLock s
-        val pfd = withContext(Dispatchers.IO) { runCatching { models.openQwen() }.getOrNull() }
-            ?: return@withLock EngineState.Failed("Нет доступа к файлу модели")
-        pfd.use { engine.load(it) }
+        val id = settings.activeModelIdNow()
+        val model = id?.let { models.findModel(it) }
+            ?: return@withLock fail("Модель не выбрана: выберите её в настройках")
+        loadInto(model)
     }
+
+    private fun fail(message: String): EngineState {
+        engine.reportFailure(message)
+        return EngineState.Failed(message)
+    }
+
+    /** Загрузка [model] в пустой движок: правило памяти, отметка «грузится» на случай аварии (F009 п. 9). */
+    private suspend fun loadInto(model: LlmModel): EngineState {
+        if (!ModelCatalog.fitsMemory(model.spec.sizeBytes, totalMemBytes())) return fail(NO_MEMORY)
+        val pfd = withContext(Dispatchers.IO) { runCatching { models.openModel(model) }.getOrNull() }
+            ?: return fail("Не удалось загрузить ${model.title}: нет доступа к файлу модели")
+        settings.setBusyModelId(model.id)
+        val result = pfd.use { engine.load(it, model) }
+        settings.setBusyModelId(null)
+        if (result is EngineState.Ready) {
+            val mem = ProcessMemory.read()
+            Log.i(LOG_TAG, "load model=${model.id} ms=${result.loadMillis} rssMb=${mem.rssMb} peakMb=${mem.peakRssMb}")
+        }
+        return result
+    }
+
+    private fun totalMemBytes(): Long = runCatching {
+        val info = ActivityManager.MemoryInfo()
+        context.getSystemService(ActivityManager::class.java).getMemoryInfo(info)
+        info.totalMem
+    }.getOrDefault(0L)
+
+    /**
+     * «Применить» (F009 п. 6): выгружает прежнюю модель и грузит [id]. Во время ответа недоступно.
+     * Если новая не загрузилась — возвращается прежняя.
+     */
+    suspend fun apply(id: String): ApplyResult = sendMutex.withLock {
+        if (_active.value != null || job?.isActive == true) return@withLock ApplyResult.Busy
+        val model = models.findModel(id) ?: return@withLock ApplyResult.Failed("Модель не найдена")
+        loadMutex.withLock {
+            val previous = engine.model
+            if (previous?.id == id && engine.state.value is EngineState.Ready) {
+                saveActive(id)
+                return@withLock ApplyResult.Ok
+            }
+            // Правило памяти — до выгрузки: прежняя модель остаётся рабочей.
+            if (!ModelCatalog.fitsMemory(model.spec.sizeBytes, totalMemBytes())) return@withLock ApplyResult.Failed(NO_MEMORY)
+            engine.unload()
+            val result = loadInto(model)
+            if (result is EngineState.Ready) {
+                saveActive(id)
+                ApplyResult.Ok
+            } else {
+                val message = (result as? EngineState.Failed)?.message ?: "Не удалось загрузить ${model.title}"
+                if (previous != null) loadInto(previous)
+                ApplyResult.Failed(message)
+            }
+        }
+    }
+
+    private suspend fun saveActive(id: String) {
+        settings.setActiveModelId(id)
+        models.writeActive(id)
+    }
+
+    /** Выгружает модель (перед удалением файлов, F007). */
+    suspend fun unloadModel() = loadMutex.withLock { engine.unload() }
 
     /**
      * Отправляет сообщение в сессию [sessionId] (null — новый диалог: сессия создаётся сейчас).
@@ -99,8 +176,8 @@ class ChatController(
         // Сначала останавливаем текущий ответ: движок однопоточный, иначе подсчёт токенов ждал бы его конца.
         stopAndJoin()
         if (loadModel() !is EngineState.Ready) return@withLock SendResult.ModelUnavailable
-        // Режим размышлений берётся из настроек на момент отправки (F007).
-        val thinking = settings.thinkingNow()
+        // Режим размышлений берётся из настроек на момент отправки (F007), если модель его умеет (F009 п. 8).
+        val thinking = settings.thinkingNow() && engine.model?.supportsThinking == true
         if (planner.isMessageTooLong(text, answerReserve(thinking))) return@withLock SendResult.TooLong
         val sid = sessionId ?: repo.createSession(text)
         repo.addMessage(sid, MessageEntity.ROLE_USER, text)
@@ -119,6 +196,9 @@ class ChatController(
         var reason = FinishReason.ERROR
         try {
             if (loadModel() !is EngineState.Ready) return
+            val model = engine.model ?: return
+            // Отметка «отвечает»: если систему убьёт процесс (память), при запуске покажем сообщение (F009 п. 9).
+            settings.setBusyModelId(model.id)
             val history = prepareHistory(sessionId, messageId, thinking)
             if (history == null) {
                 reason = if (stopRequested) FinishReason.STOPPED else FinishReason.PROMPT_TOO_LONG
@@ -126,7 +206,7 @@ class ChatController(
             }
             _active.value = ActiveGeneration(sessionId, messageId, "", thinkingInProgress = thinking)
             var lastSave = System.currentTimeMillis()
-            val params = GenerationParams(thinking = thinking, maxTokens = answerReserve(thinking))
+            val params = GenerationParams.of(model, thinking, answerReserve(thinking))
             engine.generate(history, params).collect { ev ->
                 when (ev) {
                     is GenerationEvent.Text -> {
@@ -139,11 +219,23 @@ class ChatController(
                             repo.updateMessage(messageId, p.answer, p.thinking)
                         }
                     }
-                    is GenerationEvent.Finished -> reason = ev.reason
+                    is GenerationEvent.Finished -> {
+                        reason = ev.reason
+                        val st = ev.stats
+                        val mem = ProcessMemory.read()
+                        // Замеры для карточек F003/F009 (adb logcat -s LocalAIChat).
+                        Log.i(
+                            LOG_TAG,
+                            "answer model=${model.id} reason=${ev.reason} promptTokens=${st.promptTokens} " +
+                                "ttftMs=${st.timeToFirstTokenMillis} tps=${"%.2f".format(st.tokensPerSecond)} " +
+                                "chunks=${st.generatedChunks} rssMb=${mem.rssMb} peakMb=${mem.peakRssMb}",
+                        )
+                    }
                 }
             }
         } finally {
             withContext(NonCancellable) {
+                settings.setBusyModelId(null)
                 val parsed = ThinkingParser.parse(raw.toString())
                 val answer = parsed.answer.trimEnd()
                 val text = when {
@@ -191,13 +283,11 @@ class ChatController(
     /** Новая сводка: прежняя сводка + отделённые сообщения. null — остановлено или ошибка. */
     private suspend fun summarize(previous: String, messages: List<MessageEntity>): String? {
         if (stopRequested) return null
+        val model = engine.model ?: return null
         val out = StringBuilder()
         var reason = FinishReason.ERROR
-        val params = GenerationParams(
-            thinking = false,
-            maxTokens = ContextPlanner.SUMMARY_MAX_TOKENS,
-            temperature = 0.3f,
-        )
+        // Сводку пишет активная модель (F009 п. 7), без размышлений и с низкой температурой.
+        val params = GenerationParams.of(model, thinking = false, maxTokens = ContextPlanner.SUMMARY_MAX_TOKENS, temperature = 0.3f)
         engine.generate(ContextPlanner.summaryRequest(previous, messages), params).collect { ev ->
             when (ev) {
                 is GenerationEvent.Text -> out.append(ev.piece)
@@ -229,6 +319,8 @@ class ChatController(
     }
 
     companion object {
+        private const val LOG_TAG = "LocalAIChat"
+        const val NO_MEMORY = "Модели не хватит памяти этого телефона"
         private const val SAVE_INTERVAL_MS = 2_000L
         private const val MAX_COMPRESS_ROUNDS = 3
         /** Лимит ответа без размышлений = запас под ответ в бюджете контекста (F006). */

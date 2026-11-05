@@ -13,6 +13,8 @@ class ContextPlanner(
     private val countTokens: suspend (String) -> Int,
     private val contextSize: Int,
     private val systemPrompt: String,
+    /** Промпт по шаблону активной модели (F009 п. 7); по умолчанию — Qwen. */
+    private val buildPrompt: (List<ChatMessage>, Boolean) -> String = { m, t -> QwenChatTemplate.build(m, t) },
 ) {
     /** Что делать перед генерацией. */
     sealed interface Plan {
@@ -34,13 +36,13 @@ class ContextPlanner(
     fun history(summary: String, recent: List<MessageEntity>): List<ChatMessage> =
         listOf(systemMessage(summary)) + ModelHistory.build(recent).drop(1)
 
-    /** Токены промпта целиком, с разметкой шаблона Qwen. */
+    /** Токены промпта целиком, с разметкой шаблона модели. */
     suspend fun promptTokens(history: List<ChatMessage>, thinking: Boolean): Int =
-        countTokens(QwenChatTemplate.build(history, thinking))
+        countTokens(buildPrompt(history, thinking))
 
     /** Доля контекста под последние сообщения и новое сообщение. */
     suspend fun recentShare(answerReserve: Int): Int {
-        val system = countTokens(QwenChatTemplate.build(listOf(ChatMessage(ChatRole.SYSTEM, systemPrompt)), false))
+        val system = countTokens(buildPrompt(listOf(ChatMessage(ChatRole.SYSTEM, systemPrompt)), false))
         return contextSize - answerReserve - system - SUMMARY_MAX_TOKENS
     }
 

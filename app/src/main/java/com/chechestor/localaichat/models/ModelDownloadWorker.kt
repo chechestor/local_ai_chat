@@ -9,6 +9,7 @@ import androidx.documentfile.provider.DocumentFile
 import androidx.work.BackoffPolicy
 import androidx.work.Constraints
 import androidx.work.CoroutineWorker
+import androidx.work.Data
 import androidx.work.ExistingWorkPolicy
 import androidx.work.ForegroundInfo
 import androidx.work.NetworkType
@@ -18,44 +19,54 @@ import androidx.work.WorkerParameters
 import androidx.work.workDataOf
 import com.chechestor.localaichat.R
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import java.io.FileOutputStream
 import java.io.IOException
 import java.util.concurrent.TimeUnit
 
 /**
- * Фоновая загрузка моделей (F008): только Wi-Fi, докачка с места обрыва, проверка SHA-256,
+ * Фоновая загрузка моделей (F008, F009): только Wi-Fi, докачка с места обрыва, проверка SHA-256,
  * уведомление с прогрессом. Пропал Wi-Fi — задача ставится на паузу (retry) и продолжается, когда он вернётся.
+ * Каждая задача качает свой список файлов по очереди; задачи между собой тоже идут по одной ([downloadLock]).
  */
 class ModelDownloadWorker(context: Context, params: WorkerParameters) : CoroutineWorker(context, params) {
     private val store = ModelStore(context)
 
     override suspend fun doWork(): Result = withContext(Dispatchers.IO) {
-        runCatching { setForeground(foregroundInfo(0, 0, "Подготовка…")) }
-        val dir = store.folder() ?: return@withContext failure("Нет доступа к папке ${store.folderDisplayPath()}. Выберите её заново.")
+        val specs = specsFrom(inputData)
+        if (specs.isEmpty()) return@withContext Result.success()
+        // Другая задача качает — ждём своей очереди («В очереди», F009 п. 5).
+        setProgress(workDataOf(KEY_QUEUED to true, KEY_MODEL_ID to specs.first().id))
+        downloadLock.withLock { downloadAll(specs) }
+    }
 
-        val specs = ModelCatalog.ALL
+    private suspend fun downloadAll(specs: List<ModelSpec>): Result {
+        runCatching { setForeground(foregroundInfo(0, 0, "Подготовка…")) }
+        val dir = store.folder() ?: return failure("Нет доступа к папке ${store.folderDisplayPath()}. Выберите её заново.")
+
         val total = specs.sumOf { it.sizeBytes }
         for ((index, spec) in specs.withIndex()) {
             val existing = dir.findFile(spec.fileName)
             if (existing != null && existing.length() == spec.sizeBytes) continue
             existing?.delete()
-            if (!WifiState.isWifi(applicationContext)) return@withContext Result.retry()
+            if (!WifiState.isWifi(applicationContext)) return Result.retry()
             try {
                 download(dir, spec, index, specs.size, total)
             } catch (e: ModelHttp.ForbiddenHostException) {
-                return@withContext failure(e.message ?: "Недопустимый адрес загрузки")
+                return failure(e.message ?: "Недопустимый адрес загрузки")
             } catch (e: ShaMismatchException) {
-                return@withContext failure("Файл «${spec.fileName}» скачался с ошибкой (не совпала контрольная сумма). Нажмите «Повторить».")
+                return failure("Файл «${spec.fileName}» скачался с ошибкой (не совпала контрольная сумма). Нажмите «Повторить».")
             } catch (e: IOException) {
-                if (isStopped) return@withContext Result.retry()
+                if (isStopped) return Result.retry()
                 // Обрыв сети: продолжим с места обрыва, когда снова будет Wi-Fi.
-                return@withContext if (runAttemptCount < MAX_ATTEMPTS) Result.retry()
+                return if (runAttemptCount < MAX_ATTEMPTS) Result.retry()
                 else failure("Не удалось скачать «${spec.fileName}»: ${e.message}")
             }
-            if (isStopped) return@withContext Result.retry()
+            if (isStopped) return Result.retry()
         }
-        Result.success()
+        return Result.success()
     }
 
     private class ShaMismatchException : IOException()
@@ -116,6 +127,7 @@ class ModelDownloadWorker(context: Context, params: WorkerParameters) : Coroutin
             workDataOf(
                 KEY_MODEL_ID to spec.id,
                 KEY_MODEL_INDEX to index,
+                KEY_MODEL_COUNT to count,
                 KEY_MODEL_BYTES to bytes,
                 KEY_MODEL_TOTAL to spec.sizeBytes,
                 KEY_VERIFYING to verifying,
@@ -147,9 +159,15 @@ class ModelDownloadWorker(context: Context, params: WorkerParameters) : Coroutin
     }
 
     companion object {
+        /** Задача экрана «Установка моделей» (F008, F009 п. 2). */
         const val WORK_NAME = "model-download"
+        /** Метка всех задач загрузки; `model:<id>` — метка каждой модели в задаче. */
+        const val TAG = "model-download"
+        const val TAG_MODEL_PREFIX = "model:"
         const val KEY_MODEL_ID = "model_id"
         const val KEY_MODEL_INDEX = "model_index"
+        const val KEY_MODEL_COUNT = "model_count"
+        const val KEY_QUEUED = "queued"
         const val KEY_MODEL_BYTES = "model_bytes"
         const val KEY_MODEL_TOTAL = "model_total"
         const val KEY_VERIFYING = "verifying"
@@ -159,17 +177,64 @@ class ModelDownloadWorker(context: Context, params: WorkerParameters) : Coroutin
         private const val MAX_ATTEMPTS = 50
         private const val MB = 1024 * 1024
 
-        fun start(context: Context) {
-            val request = OneTimeWorkRequestBuilder<ModelDownloadWorker>()
+        private const val KEY_IDS = "ids"
+        private const val KEY_TITLES = "titles"
+        private const val KEY_FILES = "files"
+        private const val KEY_URLS = "urls"
+        private const val KEY_SIZES = "sizes"
+        private const val KEY_SHAS = "shas"
+
+        /** Задачи загрузки в процессе идут по одной: одна сеть, одно уведомление. */
+        private val downloadLock = Mutex()
+
+        /**
+         * Ставит загрузку [specs] по очереди. [workName] — уникальное имя задачи: экран установки — [WORK_NAME],
+         * настройки — [workNameFor] модели (F009 п. 5).
+         */
+        fun start(context: Context, specs: List<ModelSpec>, workName: String = WORK_NAME) {
+            val data = Data.Builder()
+                .putStringArray(KEY_IDS, specs.map { it.id }.toTypedArray())
+                .putStringArray(KEY_TITLES, specs.map { it.title }.toTypedArray())
+                .putStringArray(KEY_FILES, specs.map { it.fileName }.toTypedArray())
+                .putStringArray(KEY_URLS, specs.map { it.url }.toTypedArray())
+                .putLongArray(KEY_SIZES, specs.map { it.sizeBytes }.toLongArray())
+                .putStringArray(KEY_SHAS, specs.map { it.sha256 }.toTypedArray())
+                .build()
+            val builder = OneTimeWorkRequestBuilder<ModelDownloadWorker>()
                 // UNMETERED: WorkManager не запустит задачу по мобильной сети; внутри — ещё проверка именно Wi-Fi.
                 .setConstraints(Constraints.Builder().setRequiredNetworkType(NetworkType.UNMETERED).build())
                 .setBackoffCriteria(BackoffPolicy.LINEAR, 15, TimeUnit.SECONDS)
-                .build()
-            WorkManager.getInstance(context).enqueueUniqueWork(WORK_NAME, ExistingWorkPolicy.KEEP, request)
+                .setInputData(data)
+                .addTag(TAG)
+            specs.forEach { builder.addTag(TAG_MODEL_PREFIX + it.id) }
+            WorkManager.getInstance(context).enqueueUniqueWork(workName, ExistingWorkPolicy.KEEP, builder.build())
         }
 
+        fun workNameFor(id: String) = "$WORK_NAME-$id"
+
+        /** Отменяет задачу экрана установки. */
         fun cancel(context: Context) {
             WorkManager.getInstance(context).cancelUniqueWork(WORK_NAME)
+        }
+
+        /** Отменяет загрузку модели из настроек (F009 п. 5). */
+        fun cancelModel(context: Context, id: String) {
+            WorkManager.getInstance(context).cancelUniqueWork(workNameFor(id))
+        }
+
+        /** Отменяет все загрузки («Удалить и скачать заново»). */
+        fun cancelAll(context: Context) {
+            WorkManager.getInstance(context).cancelAllWorkByTag(TAG)
+        }
+
+        private fun specsFrom(data: Data): List<ModelSpec> {
+            val ids = data.getStringArray(KEY_IDS) ?: return emptyList()
+            val titles = data.getStringArray(KEY_TITLES) ?: return emptyList()
+            val files = data.getStringArray(KEY_FILES) ?: return emptyList()
+            val urls = data.getStringArray(KEY_URLS) ?: return emptyList()
+            val sizes = data.getLongArray(KEY_SIZES) ?: return emptyList()
+            val shas = data.getStringArray(KEY_SHAS) ?: return emptyList()
+            return ids.indices.map { i -> ModelSpec(ids[i], titles[i], files[i], urls[i], sizes[i], shas[i]) }
         }
     }
 }
