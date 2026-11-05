@@ -30,7 +30,7 @@
 
 ## Список задач
 
-* [ ] F001. Каркас Android-проекта и сборка APK в GitHub Actions
+* [x] F001. Каркас Android-проекта и сборка APK в GitHub Actions
 * [ ] F002. Скрипт переустановки приложения на телефон
 * [ ] F003. Движок LLM: llama.cpp и Qwen3-0.6B на устройстве
 * [ ] F004. Диалоги: список сессий, экран диалога, хранение
@@ -43,7 +43,7 @@
 
 ### F001. Каркас Android-проекта и сборка APK в GitHub Actions
 
-- Статус: в работе
+- Статус: готова к проверке
 - Родитель: —
 - Приоритет: P1
 - Источник: `.task/task.md`, раздел 6; владелец, 2026-11-05: «Да» (стек Kotlin, Compose, Room); «хватит артефакта сборки и хватит debug ключа»; «Лежит в архиве артефакта рядом со скриптом»; «Минимальная версия - 11»
@@ -74,6 +74,30 @@
 - Не заводить других веток.
 
 #### Разработка
+
+Сделано (коммит `c112222`):
+
+- Gradle-проект в корне: Gradle Wrapper 8.14.3 (с SHA-256 дистрибутива), модуль `app/`, версии в `gradle/libs.versions.toml`.
+- Версии: AGP 8.13.2 (последний 8.x), Kotlin 2.2.21, Compose BOM 2025.06.01, activity-compose 1.10.1, lifecycle 2.9.4, core-ktx 1.16.0, JUnit 4.13.2. Версии AndroidX — последние, которые поддерживают compileSdk 35.
+- `applicationId` и namespace — `com.chechestor.localaichat`; minSdk 30, compileSdk/targetSdk 35, Java/Kotlin target 17. ABI: `arm64-v8a` и `x86_64` (для эмулятора). Подпись — стандартный debug-ключ.
+- `MainActivity` на Compose: экран с надписью «Local AI Chat»; тема светлая или тёмная, как в системе. Иконка — простое облачко сообщения.
+- Unit-тест `AppTitleTest`, lint с `abortOnError`.
+- CI: `.github/workflows/build-apk.yml`. Запускается на push в `main` и вручную; ubuntu-latest, JDK 17. Шаги: `testDebugUnitTest lintDebug assembleDebug`. Результат — артефакт `local-ai-chat-<короткий sha>` (`retention-days: 14`) с файлом `local-ai-chat-<sha>.apk`. Файлы `*.ps1` из корня (F002) попадут в тот же архив автоматически.
+
+Проверено:
+
+- Локально (Windows, JDK 21): `./gradlew testDebugUnitTest lintDebug assembleDebug` — успешно. Lint: 0 ошибок, 12 предупреждений. Из них 11 — «доступна новая версия» (ожидаемо при compileSdk 35), 1 — `allowBackup`. APK ~27 МБ.
+- CI: запуск «Build APK» #1 для `c112222` — зелёный, артефакт с APK есть (проверили оркестратор и владелец).
+- Владелец, 2026-11-05: APK из артефакта ставится на телефон, приложение показывает экран «Local AI Chat»; в архиве только APK (скрипта F002 ещё нет).
+
+Как проверить: открыть последний запуск «Build APK» в Actions, скачать `local-ai-chat-<sha>`, поставить APK, увидеть экран «Local AI Chat».
+
+Риски и заметки:
+
+- Для локальной сборки нужен `local.properties` с `sdk.dir` (не в git). Android Studio создаёт его сама.
+- compileSdk 35 закрывает доступ к новым версиям AndroidX. Чтобы поднять версии, нужно новое решение (compileSdk 36).
+- Нативная часть (llama.cpp) появится в F003. Тогда сборка CI станет дольше, понадобятся NDK и CMake.
+
 #### Проверка
 
 ### F002. Скрипт переустановки приложения на телефон
