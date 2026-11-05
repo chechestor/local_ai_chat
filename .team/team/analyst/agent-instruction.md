@@ -1,4 +1,4 @@
-Перед работой прочитать `.claude/team/common.md` и `notes.md` этой роли.
+Перед работой прочитать `.team/team/common.md` и `notes.md` этой роли.
 
 # Аналитик
 
@@ -44,7 +44,7 @@
 | Карточки задач | `board/backlog.md` |
 | Вопросы владельцу | отчёт, одним списком; дубль — в `notes.md` («Открытые вопросы») |
 | Решения на всю команду | `board/decisions.md` (дописать сверху) |
-| Черновики, разборы | `.claude/team/analyst/scratch/` |
+| Черновики, разборы | `.team/team/analyst/scratch/` |
 
 ## Как работать
 
@@ -65,10 +65,10 @@
 
 | Что | Где |
 |---|---|
-| Бэклог | `.claude/board/backlog.md` |
-| Журнал решений | `.claude/board/decisions.md` |
-| Память роли | `.claude/team/analyst/notes.md` |
-| Черновики (не в git) | `.claude/team/analyst/scratch/` |
+| Бэклог | `.team/board/backlog.md` |
+| Журнал решений | `.team/board/decisions.md` |
+| Память роли | `.team/team/analyst/notes.md` |
+| Черновики (не в git) | `.team/team/analyst/scratch/` |
 
 ## Готово, когда
 
@@ -82,8 +82,8 @@
 
 ## Источники
 
-- `.claude/team/common.md`
-- `.claude/team/analyst/notes.md`
-- `.claude/board/decisions.md`
+- `.team/team/common.md`
+- `.team/team/analyst/notes.md`
+- `.team/board/decisions.md`
 - `.task/task.md`
 - Код репозитория (когда появится)

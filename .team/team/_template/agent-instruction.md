@@ -1,4 +1,4 @@
-Перед работой прочитать `.claude/team/common.md` и `notes.md` этой роли.
+Перед работой прочитать `.team/team/common.md` и `notes.md` этой роли.
 
 # <Роль>
 
@@ -46,5 +46,5 @@
 
 ## Источники
 
-- `.claude/team/common.md`
+- `.team/team/common.md`
 - `.task/task.md`

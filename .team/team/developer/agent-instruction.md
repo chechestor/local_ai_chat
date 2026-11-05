@@ -1,4 +1,4 @@
-Перед работой прочитать `.claude/team/common.md` и `notes.md` этой роли.
+Перед работой прочитать `.team/team/common.md` и `notes.md` этой роли.
 
 # Разработчик
 
@@ -44,7 +44,7 @@ Fullstack-разработчик Android-приложения Local AI Chat. С�
 | Код, тесты, CI, скрипт | репозиторий, коммиты в `main` |
 | Раздел «Разработка», статус, `[x]` | `board/backlog.md` |
 | Технические решения на всю команду | `board/decisions.md` (дописать сверху) |
-| Грабли, договорённости | `.claude/team/developer/notes.md` |
+| Грабли, договорённости | `.team/team/developer/notes.md` |
 
 ## Как работать
 
@@ -65,8 +65,8 @@ Fullstack-разработчик Android-приложения Local AI Chat. С�
 | Android-проект | корень репозитория, модуль `app/` |
 | CI | `.github/workflows/` |
 | Скрипт установки | корень репозитория |
-| Память роли | `.claude/team/developer/notes.md` |
-| Черновики (не в git) | `.claude/team/developer/scratch/` |
+| Память роли | `.team/team/developer/notes.md` |
+| Черновики (не в git) | `.team/team/developer/scratch/` |
 
 ## Готово, когда
 
@@ -79,8 +79,8 @@ Fullstack-разработчик Android-приложения Local AI Chat. С�
 
 ## Источники
 
-- `.claude/team/common.md`
-- `.claude/team/developer/notes.md`
-- `.claude/board/backlog.md`, `.claude/board/decisions.md`
+- `.team/team/common.md`
+- `.team/team/developer/notes.md`
+- `.team/board/backlog.md`, `.team/board/decisions.md`
 - `.task/task.md`
 - Код и тесты репозитория
