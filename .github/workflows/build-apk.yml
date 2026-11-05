@@ -29,6 +29,20 @@ jobs:
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v6
 
+      - name: Check install.ps1 (syntax, UTF-8 BOM)
+        shell: pwsh
+        run: |
+          $path = Join-Path $PWD 'install.ps1'
+          $errors = $null
+          [System.Management.Automation.Language.Parser]::ParseFile($path, [ref]$null, [ref]$errors) | Out-Null
+          if ($errors) { $errors | ForEach-Object { Write-Host "::error::$($_.Message) (line $($_.Extent.StartLineNumber))" }; exit 1 }
+          $bytes = [System.IO.File]::ReadAllBytes($path)
+          if ($bytes.Length -lt 3 -or $bytes[0] -ne 0xEF -or $bytes[1] -ne 0xBB -or $bytes[2] -ne 0xBF) {
+            Write-Host '::error::install.ps1 must be saved as UTF-8 with BOM (Windows PowerShell 5.1 reads Russian text wrong otherwise)'
+            exit 1
+          }
+          Write-Host 'install.ps1 OK'
+
       - name: Unit tests, lint, debug APK
         run: ./gradlew --no-daemon testDebugUnitTest lintDebug assembleDebug
 
