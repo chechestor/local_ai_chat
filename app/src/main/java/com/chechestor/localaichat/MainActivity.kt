@@ -17,7 +17,10 @@ import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.tooling.preview.Preview
+import androidx.lifecycle.viewmodel.compose.viewModel
 import com.chechestor.localaichat.modeltest.ModelTestScreen
+import com.chechestor.localaichat.setup.SetupGate
+import com.chechestor.localaichat.setup.SetupViewModel
 
 /** Заголовок главного экрана (F001). */
 const val APP_TITLE = "Local AI Chat"
@@ -28,8 +31,12 @@ class MainActivity : ComponentActivity() {
         enableEdgeToEdge()
         setContent {
             LocalAiChatTheme {
-                // F003: временный экран проверки модели; диалоги — F004.
-                ModelTestScreen()
+                // F008: пока модели не установлены, доступны только экраны установки.
+                val setup: SetupViewModel = viewModel()
+                SetupGate(setup) {
+                    // F003: временный экран проверки модели; диалоги — F004.
+                    ModelTestScreen(onDeleteModels = setup::deleteAndReinstall)
+                }
             }
         }
     }

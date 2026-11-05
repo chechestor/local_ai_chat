@@ -1,7 +1,6 @@
 package com.chechestor.localaichat.modeltest
 
 import android.app.Application
-import android.os.ParcelFileDescriptor
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.chechestor.localaichat.LocalAiChatApp
@@ -14,7 +13,9 @@ import com.chechestor.localaichat.llm.GenerationParams
 import com.chechestor.localaichat.llm.GenerationStats
 import com.chechestor.localaichat.llm.ProcessMemory
 import com.chechestor.localaichat.llm.ThinkingParser
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -25,8 +26,6 @@ data class TurnUi(val user: String, val thinking: String, val answer: String)
 
 data class ModelTestUi(
     val engine: EngineState = EngineState.NotLoaded,
-    val modelPath: String = "",
-    val modelExists: Boolean = false,
     val input: String = "",
     val thinking: Boolean = false,
     val generating: Boolean = false,
@@ -48,23 +47,19 @@ class ModelTestViewModel(app: Application) : AndroidViewModel(app) {
     private var job: Job? = null
 
     init {
-        refreshModelFile()
         viewModelScope.launch { engine.state.collect { s -> _ui.update { it.copy(engine = s, memory = ProcessMemory.read()) } } }
-        loadIfPossible()
     }
 
-    fun refreshModelFile() {
-        val f = chatApp.devModelFile
-        _ui.update { it.copy(modelPath = f.absolutePath, modelExists = f.isFile) }
-    }
-
-    /** Загрузка один раз за запуск, в фоне. */
+    /** Загрузка один раз за запуск, в фоне: файл Qwen открывается из папки моделей по дескриптору (F008). */
     fun loadIfPossible() {
-        refreshModelFile()
-        val f = chatApp.devModelFile
-        if (!f.isFile || engine.state.value is EngineState.Ready || engine.state.value is EngineState.Loading) return
+        if (engine.state.value is EngineState.Ready || engine.state.value is EngineState.Loading) return
         viewModelScope.launch {
-            ParcelFileDescriptor.open(f, ParcelFileDescriptor.MODE_READ_ONLY).use { pfd -> engine.load(pfd) }
+            val pfd = withContext(Dispatchers.IO) { runCatching { chatApp.models.openQwen() }.getOrNull() }
+            if (pfd == null) {
+                _ui.update { it.copy(engine = EngineState.Failed("Нет доступа к файлу модели в папке ${chatApp.models.folderDisplayPath()}")) }
+                return@launch
+            }
+            pfd.use { engine.load(it) }
             _ui.update { it.copy(memory = ProcessMemory.read()) }
         }
     }

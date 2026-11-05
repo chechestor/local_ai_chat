@@ -13,7 +13,9 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.Card
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
@@ -25,6 +27,9 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontStyle
@@ -37,11 +42,23 @@ import com.chechestor.localaichat.llm.FinishReason
 
 /** Временный экран проверки движка Qwen (F003). Будет заменён диалогами (F004). */
 @Composable
-fun ModelTestScreen(vm: ModelTestViewModel = viewModel()) {
+fun ModelTestScreen(onDeleteModels: () -> Unit, vm: ModelTestViewModel = viewModel()) {
+    var confirmDelete by remember { mutableStateOf(false) }
     val ui by vm.ui.collectAsStateWithLifecycle()
     val listState = rememberLazyListState()
+    LaunchedEffect(Unit) { vm.loadIfPossible() }
     LaunchedEffect(ui.turns.size, ui.turns.lastOrNull()?.answer?.length) {
         if (ui.turns.isNotEmpty()) listState.scrollToItem(ui.turns.size - 1)
+    }
+
+    if (confirmDelete) {
+        AlertDialog(
+            onDismissRequest = { confirmDelete = false },
+            title = { Text("Удалить модели?") },
+            text = { Text("Файлы моделей будут удалены из папки Download/LocalAIChat и скачаны заново. Диалоги не пострадают.") },
+            confirmButton = { TextButton(onClick = { confirmDelete = false; onDeleteModels() }) { Text("Удалить") } },
+            dismissButton = { TextButton(onClick = { confirmDelete = false }) { Text("Отмена") } },
+        )
     }
 
     Surface(Modifier.fillMaxSize()) {
@@ -54,7 +71,7 @@ fun ModelTestScreen(vm: ModelTestViewModel = viewModel()) {
             verticalArrangement = Arrangement.spacedBy(8.dp),
         ) {
             Text(APP_TITLE, style = MaterialTheme.typography.titleLarge)
-            Text("Проверка модели (F003)", style = MaterialTheme.typography.labelMedium)
+            Text("Проверка модели (F003/F008)", style = MaterialTheme.typography.labelMedium)
             EngineStatus(ui, onRetry = vm::loadIfPossible)
 
             LazyColumn(Modifier.weight(1f).fillMaxWidth(), state = listState, verticalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -78,6 +95,8 @@ fun ModelTestScreen(vm: ModelTestViewModel = viewModel()) {
                 Spacer(Modifier.weight(1f))
                 OutlinedButton(onClick = vm::clearDialog, enabled = !ui.generating) { Text("Новый диалог") }
             }
+            // Временно до F007 (там эта кнопка будет в настройках).
+            TextButton(onClick = { confirmDelete = true }, enabled = !ui.generating) { Text("Удалить и скачать заново") }
             Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 OutlinedTextField(
                     value = ui.input,
@@ -103,13 +122,7 @@ fun ModelTestScreen(vm: ModelTestViewModel = viewModel()) {
 private fun EngineStatus(ui: ModelTestUi, onRetry: () -> Unit) {
     when (val s = ui.engine) {
         EngineState.NotLoaded -> Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-            if (ui.modelExists) {
-                Text("Модель не загружена")
-            } else {
-                Text("Файл модели не найден:", style = MaterialTheme.typography.bodySmall)
-                Text(ui.modelPath, style = MaterialTheme.typography.bodySmall)
-                Text("Положите его командой adb push (см. карточку F003) и нажмите «Загрузить».", style = MaterialTheme.typography.bodySmall)
-            }
+            Text("Модель не загружена")
             OutlinedButton(onClick = onRetry) { Text("Загрузить") }
         }
         EngineState.Loading -> Column {
