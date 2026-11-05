@@ -9,6 +9,8 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <!-- F005: голосовой ввод (распознавание на устройстве, Vosk). -->
+    <uses-permission android:name="android.permission.RECORD_AUDIO" />
     <!-- F004: генерация ответа в свёрнутом приложении (foreground service с уведомлением). -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
 

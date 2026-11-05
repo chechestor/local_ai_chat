@@ -92,6 +92,9 @@ dependencies {
     implementation(libs.androidx.navigation.compose)
     implementation(libs.markdown.renderer.m3)
     implementation(libs.androidx.datastore.preferences)
+    // Vosk (F005): JNA подключается в варианте AAR — в нём нативная libjnidispatch.so для Android.
+    implementation(libs.vosk.android) { exclude(group = "net.java.dev.jna") }
+    implementation(libs.jna) { artifact { type = "aar" } }
     debugImplementation(libs.androidx.compose.ui.tooling)
 
     testImplementation(libs.junit)

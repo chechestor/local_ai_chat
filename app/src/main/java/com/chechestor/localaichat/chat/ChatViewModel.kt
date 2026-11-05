@@ -7,6 +7,9 @@ import com.chechestor.localaichat.LocalAiChatApp
 import com.chechestor.localaichat.data.MessageEntity
 import com.chechestor.localaichat.data.SessionEntity
 import com.chechestor.localaichat.llm.EngineState
+import com.chechestor.localaichat.voice.VoiceInput
+import com.chechestor.localaichat.voice.VoiceResult
+import com.chechestor.localaichat.voice.VoiceState
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -53,8 +56,41 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     val active: StateFlow<ActiveGeneration?> = controller.active
     val engineState: StateFlow<EngineState> = controller.engineState
 
+    /** Голосовой ввод (F005). */
+    private val voice = VoiceInput(viewModelScope, { chatApp.models.voskModelDir() }, ::onVoiceResult)
+    val voiceState: StateFlow<VoiceState> = voice.state
+    private var inputBeforeVoice = ""
+
     init {
         controller.ensureModelLoaded()
+    }
+
+    /** «Записать голос». Во время ответа модели запись недоступна (две модели в памяти не держим). */
+    fun startVoice() {
+        if (controller.active.value != null) return
+        inputBeforeVoice = _input.value
+        voice.start()
+    }
+
+    fun finishVoice() = voice.finish()
+    fun cancelVoice() = voice.cancel()
+
+    fun onMicPermissionDenied() {
+        _messagesToUser.tryEmit("Нужен доступ к микрофону")
+    }
+
+    private fun onVoiceResult(result: VoiceResult) {
+        when (result) {
+            is VoiceResult.Text -> _input.value = VoiceInput.appendToInput(inputBeforeVoice, result.text)
+            VoiceResult.Nothing -> _messagesToUser.tryEmit("Речь не распознана")
+            VoiceResult.Cancelled -> Unit // поле не меняется
+            is VoiceResult.Error -> _messagesToUser.tryEmit(result.message)
+        }
+    }
+
+    override fun onCleared() {
+        voice.cancel()
+        super.onCleared()
     }
 
     fun onInput(text: String) {

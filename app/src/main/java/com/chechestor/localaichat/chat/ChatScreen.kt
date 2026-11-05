@@ -1,8 +1,12 @@
 package com.chechestor.localaichat.chat
 
+import android.Manifest
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
+import android.content.pm.PackageManager
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Arrangement
@@ -57,7 +61,11 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.text.SpanStyle
+import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontStyle
+import androidx.compose.ui.text.withStyle
+import androidx.core.content.ContextCompat
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -66,6 +74,8 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 import com.chechestor.localaichat.data.MessageEntity
 import com.chechestor.localaichat.data.SessionEntity
 import com.chechestor.localaichat.llm.EngineState
+import com.chechestor.localaichat.voice.VoiceInput
+import com.chechestor.localaichat.voice.VoiceState
 import com.mikepenz.markdown.m3.Markdown
 import kotlinx.coroutines.launch
 
@@ -86,6 +96,18 @@ fun ChatScreen(onOpenSettings: () -> Unit, vm: ChatViewModel = viewModel()) {
     val engine by vm.engineState.collectAsStateWithLifecycle()
     val input by vm.input.collectAsStateWithLifecycle()
     LaunchedEffect(Unit) { vm.messagesToUser.collect { snackbar.showSnackbar(it) } }
+    val voice by vm.voiceState.collectAsStateWithLifecycle()
+    val context = LocalContext.current
+    val micPermission = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
+        if (granted) vm.startVoice() else vm.onMicPermissionDenied()
+    }
+    val onMic = {
+        if (ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED) {
+            vm.startVoice()
+        } else {
+            micPermission.launch(Manifest.permission.RECORD_AUDIO)
+        }
+    }
 
     ModalNavigationDrawer(
         drawerState = drawerState,
@@ -140,6 +162,12 @@ fun ChatScreen(onOpenSettings: () -> Unit, vm: ChatViewModel = viewModel()) {
                     canSend = engine !is EngineState.Failed,
                     onSend = vm::send,
                     onStop = vm::stop,
+                    voice = voice,
+                    // Во время ответа модели (в любом диалоге) запись недоступна (F005 п. 3).
+                    micEnabled = active == null,
+                    onMic = onMic,
+                    onVoiceCancel = vm::cancelVoice,
+                    onVoiceFinish = vm::finishVoice,
                 )
             }
         }
@@ -287,33 +315,89 @@ private fun InputBar(
     canSend: Boolean,
     onSend: () -> Unit,
     onStop: () -> Unit,
+    voice: VoiceState,
+    micEnabled: Boolean,
+    onMic: () -> Unit,
+    onVoiceCancel: () -> Unit,
+    onVoiceFinish: () -> Unit,
 ) {
     Column(Modifier.fillMaxWidth().navigationBarsPadding().padding(8.dp)) {
-        OutlinedTextField(
-            value = text,
-            onValueChange = onText,
-            modifier = Modifier.fillMaxWidth(),
-            placeholder = { Text("Сообщение") },
-            maxLines = 6,
-            shape = RoundedCornerShape(20.dp),
-        )
+        val live = when (voice) {
+            is VoiceState.Recording -> voice.text
+            is VoiceState.Finishing -> voice.text
+            else -> null
+        }
+        if (voice == VoiceState.Idle) {
+            OutlinedTextField(
+                value = text,
+                onValueChange = onText,
+                modifier = Modifier.fillMaxWidth(),
+                placeholder = { Text("Сообщение") },
+                maxLines = 6,
+                shape = RoundedCornerShape(20.dp),
+            )
+        } else {
+            // Во время записи поле не редактируется; распознанное на лету — серым после введённого текста.
+            val gray = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f)
+            Surface(
+                shape = RoundedCornerShape(20.dp),
+                color = MaterialTheme.colorScheme.surfaceContainerHigh,
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                Text(
+                    buildAnnotatedString {
+                        append(text)
+                        if (!live.isNullOrBlank()) {
+                            if (text.isNotBlank()) append(" ")
+                            withStyle(SpanStyle(color = gray)) { append(live) }
+                        }
+                        if (text.isBlank() && live.isNullOrBlank()) {
+                            withStyle(SpanStyle(color = gray)) { append("Говорите…") }
+                        }
+                    },
+                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 14.dp),
+                    maxLines = 6,
+                )
+            }
+        }
         Row(
             Modifier.fillMaxWidth().padding(top = 4.dp),
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(4.dp),
         ) {
-            TextButton(onClick = onClear, enabled = text.isNotEmpty()) { Text("Очистить поле") }
-            // Поведение кнопки — F005 (Vosk).
-            TextButton(onClick = {}, enabled = false) { Text("🎤 Записать голос") }
-            Spacer(Modifier.weight(1f))
-            if (generating) {
-                Button(onClick = onStop) { Text("Стоп") }
-            } else {
-                Button(onClick = onSend, enabled = text.isNotBlank() && canSend) { Text("Отправить") }
+            when (voice) {
+                VoiceState.Idle -> {
+                    TextButton(onClick = onClear, enabled = text.isNotEmpty()) { Text("Очистить поле") }
+                    TextButton(onClick = onMic, enabled = micEnabled) { Text("🎤 Записать голос") }
+                    Spacer(Modifier.weight(1f))
+                    if (generating) {
+                        Button(onClick = onStop) { Text("Стоп") }
+                    } else {
+                        Button(onClick = onSend, enabled = text.isNotBlank() && canSend) { Text("Отправить") }
+                    }
+                }
+                VoiceState.Preparing -> {
+                    Text("Подготовка…", Modifier.weight(1f).padding(start = 8.dp))
+                    OutlinedButton(onClick = onVoiceCancel) { Text("Отменить") }
+                }
+                is VoiceState.Recording -> {
+                    Text(
+                        "● ${formatSec(voice.elapsedSec)} / ${formatSec(VoiceInput.LIMIT_SEC)}",
+                        color = MaterialTheme.colorScheme.error,
+                        modifier = Modifier.weight(1f).padding(start = 8.dp),
+                    )
+                    OutlinedButton(onClick = onVoiceCancel) { Text("Отменить") }
+                    Button(onClick = onVoiceFinish) { Text("Завершить") }
+                }
+                is VoiceState.Finishing -> {
+                    Text("Распознаю…", Modifier.weight(1f).padding(start = 8.dp))
+                }
             }
         }
     }
 }
+
+private fun formatSec(sec: Int) = "%d:%02d".format(sec / 60, sec % 60)
 
 @Composable
 private fun SessionsDrawer(
